@@ -17,23 +17,58 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '20');
+    const filter = searchParams.get('filter') || 'all'; // 'upcoming', 'past', 'all'
     const skip = (page - 1) * limit;
+
+    // Build where clause based on filter
+    const now = new Date();
+    const whereClause: Record<string, unknown> = {};
+
+    if (filter === 'upcoming') {
+      whereClause.scheduledStart = { gte: now };
+      whereClause.status = { in: ['SCHEDULED', 'JOINING', 'WAITING', 'RECORDING'] };
+    } else if (filter === 'past') {
+      whereClause.OR = [
+        { scheduledStart: { lt: now } },
+        { status: { in: ['COMPLETED', 'FAILED', 'CANCELLED'] } },
+      ];
+    }
 
     const [meetings, total] = await Promise.all([
       prisma.meeting.findMany({
+        where: whereClause,
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: filter === 'upcoming'
+          ? { scheduledStart: 'asc' }
+          : { scheduledStart: 'desc' },
         include: {
           recording: true,
           transcript: true,
+          summary: true,
+          calendarEvent: {
+            include: {
+              calendar: {
+                select: {
+                  name: true,
+                  color: true,
+                },
+              },
+            },
+          },
         },
       }),
-      prisma.meeting.count(),
+      prisma.meeting.count({ where: whereClause }),
     ]);
 
+    // Add recordingEnabled field based on status
+    const meetingsWithRecordingFlag = meetings.map(m => ({
+      ...m,
+      recordingEnabled: m.status !== 'CANCELLED' && m.status !== 'FAILED',
+    }));
+
     return NextResponse.json({
-      data: meetings,
+      meetings: meetingsWithRecordingFlag,
       pagination: {
         page,
         limit,

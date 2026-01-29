@@ -79,17 +79,18 @@ export async function DELETE(
   }
 }
 
-// PATCH /api/meetings/:id - Update a meeting (e.g., cancel)
+// PATCH /api/meetings/:id - Update a meeting (e.g., cancel, toggle recording)
 export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const body = await request.json();
-    const { status, title } = body;
+    const { status, title, recordingEnabled } = body;
 
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
+      include: { botSession: true },
     });
 
     if (!meeting) {
@@ -99,6 +100,48 @@ export async function PATCH(
       );
     }
 
+    // Handle recording toggle
+    if (recordingEnabled !== undefined) {
+      if (recordingEnabled) {
+        // Enable recording - set status back to SCHEDULED
+        const updated = await prisma.meeting.update({
+          where: { id: params.id },
+          data: { status: 'SCHEDULED' },
+        });
+
+        // Create or update bot session
+        await prisma.botSession.upsert({
+          where: { meetingId: params.id },
+          create: {
+            meetingId: params.id,
+            status: 'IDLE',
+          },
+          update: {
+            status: 'IDLE',
+          },
+        });
+
+        return NextResponse.json({ ...updated, recordingEnabled: true });
+      } else {
+        // Disable recording - cancel the bot
+        const updated = await prisma.meeting.update({
+          where: { id: params.id },
+          data: { status: 'CANCELLED' },
+        });
+
+        // Update bot session if exists
+        if (meeting.botSession) {
+          await prisma.botSession.update({
+            where: { meetingId: params.id },
+            data: { status: 'STOPPED' },
+          });
+        }
+
+        return NextResponse.json({ ...updated, recordingEnabled: false });
+      }
+    }
+
+    // Handle other updates
     const updated = await prisma.meeting.update({
       where: { id: params.id },
       data: {
