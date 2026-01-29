@@ -6,3 +6,6 @@ export * from './constants';
 
 // Utilities
 export * from './utils';
+
+// Crypto utilities
+export * from './crypto';

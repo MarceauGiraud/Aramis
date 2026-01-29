@@ -1,9 +1,14 @@
 import { MeetingPlatform, MEETING_URL_PATTERNS } from './constants';
 
+// Re-export for convenience
+export { MeetingPlatform };
+
 /**
  * Detect the meeting platform from a URL
  */
 export function detectPlatform(url: string): MeetingPlatform | null {
+  if (!url || typeof url !== 'string') return null;
+
   if (MEETING_URL_PATTERNS.ZOOM.test(url)) {
     return 'ZOOM';
   }
@@ -15,6 +20,9 @@ export function detectPlatform(url: string): MeetingPlatform | null {
   }
   return null;
 }
+
+// Alias for compatibility with tests
+export const detectMeetingPlatform = detectPlatform;
 
 /**
  * Validate a meeting URL
@@ -69,8 +77,8 @@ export function extractMeetingId(url: string): string | null {
 
     switch (platform) {
       case 'ZOOM': {
-        // Extract from /j/123456789 or /my/username
-        const pathMatch = urlObj.pathname.match(/\/(j|my)\/([^?/]+)/);
+        // Extract from /j/123456789 or /my/username or /s/123456789
+        const pathMatch = urlObj.pathname.match(/\/(j|my|s)\/([^?/]+)/);
         return pathMatch?.[2] || null;
       }
       case 'TEAMS': {
@@ -88,6 +96,34 @@ export function extractMeetingId(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Alias for compatibility with tests
+export function parseMeetingId(url: string, platform: MeetingPlatform): string | null {
+  return extractMeetingId(url);
+}
+
+/**
+ * Extract meeting URL from text (description, location, etc.)
+ */
+export function extractMeetingUrl(text: string): { url: string; platform: MeetingPlatform } | null {
+  if (!text || typeof text !== 'string') return null;
+
+  // URL regex pattern
+  const urlPattern = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;
+  const matches = text.match(urlPattern);
+
+  if (!matches) return null;
+
+  // Check each URL for meeting platform
+  for (const url of matches) {
+    const platform = detectPlatform(url);
+    if (platform) {
+      return { url, platform };
+    }
+  }
+
+  return null;
 }
 
 /**
