@@ -7,7 +7,10 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
-    "test": "turbo run test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui",
     "db:generate": "pnpm --filter @aramis/database generate",
     "db:push": "pnpm --filter @aramis/database push",
     "db:migrate": "pnpm --filter @aramis/database migrate",
@@ -15,8 +18,13 @@
     "docker:down": "docker-compose down"
   },
   "devDependencies": {
+    "@testing-library/react": "^14.1.2",
+    "@types/node": "^20.10.0",
+    "@vitest/coverage-v8": "^1.2.0",
+    "@vitest/ui": "^1.2.0",
     "turbo": "^2.3.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
