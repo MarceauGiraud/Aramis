@@ -1,0 +1,255 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User accounts
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts  Account[]
+  sessions  Session[]
+  meetings  Meeting[]
+  apiKeys   ApiKey[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// API Keys for programmatic access
+model ApiKey {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  name      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  lastUsed  DateTime?
+  expiresAt DateTime?
+}
+
+// Meeting recordings
+model Meeting {
+  id          String        @id @default(cuid())
+  title       String
+  platform    MeetingPlatform
+  meetingUrl  String
+  status      MeetingStatus @default(PENDING)
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  duration    Int?          // Duration in seconds
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  recording   Recording?
+  transcript  Transcript?
+  botSession  BotSession?
+  participants Participant[]
+}
+
+enum MeetingPlatform {
+  ZOOM
+  TEAMS
+  GOOGLE_MEET
+}
+
+enum MeetingStatus {
+  PENDING       // Waiting to start
+  JOINING       // Bot is joining the meeting
+  RECORDING     // Currently recording
+  PROCESSING    // Processing recording/transcript
+  COMPLETED     // Done
+  FAILED        // Error occurred
+  CANCELLED     // User cancelled
+}
+
+// Recording files
+model Recording {
+  id          String   @id @default(cuid())
+  meetingId   String   @unique
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  fileUrl     String?  // S3 URL to recording
+  fileSize    Int?     // Size in bytes
+  format      String   @default("webm")
+
+  audioUrl    String?  // Separate audio file URL
+  videoUrl    String?  // Separate video file URL
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Transcripts
+model Transcript {
+  id          String   @id @default(cuid())
+  meetingId   String   @unique
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  content     String   @db.Text  // Full transcript text
+  language    String   @default("en")
+  confidence  Float?   // Average confidence score
+
+  segments    TranscriptSegment[]
+
+  summary     String?  @db.Text  // AI-generated summary
+  actionItems String[] // Extracted action items
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Individual transcript segments with timestamps
+model TranscriptSegment {
+  id           String     @id @default(cuid())
+  transcriptId String
+  transcript   Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  startTime    Float      // Start time in seconds
+  endTime      Float      // End time in seconds
+  text         String     @db.Text
+  speaker      String?    // Speaker name/identifier
+  confidence   Float?     // Confidence score for this segment
+
+  @@index([transcriptId, startTime])
+}
+
+// Meeting participants
+model Participant {
+  id        String   @id @default(cuid())
+  meetingId String
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  name      String
+  email     String?
+  joinedAt  DateTime?
+  leftAt    DateTime?
+}
+
+// Bot session tracking
+model BotSession {
+  id          String   @id @default(cuid())
+  meetingId   String   @unique
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  workerId    String?  // Which worker instance is handling this
+  status      BotStatus @default(IDLE)
+  lastPing    DateTime?
+
+  logs        BotLog[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+enum BotStatus {
+  IDLE
+  STARTING
+  RUNNING
+  STOPPED
+  ERROR
+}
+
+// Bot activity logs
+model BotLog {
+  id           String     @id @default(cuid())
+  botSessionId String
+  botSession   BotSession @relation(fields: [botSessionId], references: [id], onDelete: Cascade)
+
+  level        LogLevel
+  message      String
+  metadata     Json?
+
+  createdAt    DateTime   @default(now())
+
+  @@index([botSessionId, createdAt])
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+// Job queue tracking (for visibility)
+model Job {
+  id          String   @id @default(cuid())
+  type        JobType
+  status      JobStatus @default(PENDING)
+  payload     Json
+  result      Json?
+  error       String?
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(3)
+
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([type, status])
+}
+
+enum JobType {
+  JOIN_MEETING
+  PROCESS_RECORDING
+  TRANSCRIBE
+  GENERATE_SUMMARY
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
