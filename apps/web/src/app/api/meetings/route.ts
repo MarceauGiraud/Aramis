@@ -123,8 +123,8 @@ export async function POST(request: NextRequest) {
         title,
         meetingUrl,
         platform,
-        scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
-        status: scheduledAt ? 'PENDING' : 'JOINING',
+        scheduledStart: scheduledAt ? new Date(scheduledAt) : new Date(),
+        status: scheduledAt ? 'SCHEDULED' : 'JOINING',
         userId: 'demo-user', // Placeholder until auth is implemented
       },
     });

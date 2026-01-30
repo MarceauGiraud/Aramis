@@ -119,6 +119,7 @@ export function hashPassword(password: string): string {
 
 /**
  * Verify a password against a hash
+ * Uses timing-safe comparison to prevent timing attacks
  */
 export function verifyPassword(password: string, storedHash: string): boolean {
   const [saltHex, hashHex] = storedHash.split(':');
@@ -130,7 +131,15 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   const salt = Buffer.from(saltHex, 'hex');
   const hash = crypto.pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, KEY_LENGTH, 'sha256');
 
-  return hash.toString('hex') === hashHex;
+  const storedHashBuffer = Buffer.from(hashHex, 'hex');
+  const computedHashBuffer = hash;
+
+  // Use timing-safe comparison to prevent timing attacks
+  if (storedHashBuffer.length !== computedHashBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(storedHashBuffer, computedHashBuffer);
 }
 
 /**

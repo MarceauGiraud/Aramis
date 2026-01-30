@@ -128,12 +128,15 @@ export function extractMeetingUrl(text: string): { url: string; platform: Meetin
 
 /**
  * Generate a random string for IDs
+ * Uses crypto.randomBytes for cryptographically secure randomness
  */
 export function generateId(length: number = 12): string {
+  const crypto = require('crypto');
+  const bytes = crypto.randomBytes(length);
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    result += chars.charAt(bytes[i] % chars.length);
   }
   return result;
 }

@@ -21,12 +21,39 @@ const meetingWorker = new Worker(
   async (job) => {
     const { meetingId, meetingUrl, platform, botName } = job.data;
 
+    // Validate required fields
+    if (!meetingId || !meetingUrl || !platform) {
+      throw new Error('Missing required job data: meetingId, meetingUrl, or platform');
+    }
+
     logger.info(`Processing job ${job.id}: Join meeting ${meetingId}`);
 
-    // Update bot session
-    await prisma.botSession.update({
+    // Verify meeting exists before processing
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: meetingId },
+      select: { id: true, status: true },
+    });
+
+    if (!meeting) {
+      throw new Error(`Meeting not found: ${meetingId}`);
+    }
+
+    // Skip if meeting was cancelled
+    if (meeting.status === 'CANCELLED') {
+      logger.info(`Meeting ${meetingId} was cancelled, skipping`);
+      return { success: false, reason: 'cancelled' };
+    }
+
+    // Update or create bot session
+    await prisma.botSession.upsert({
       where: { meetingId },
-      data: {
+      create: {
+        meetingId,
+        workerId,
+        status: 'RUNNING',
+        lastPing: new Date(),
+      },
+      update: {
         workerId,
         status: 'RUNNING',
         lastPing: new Date(),
@@ -50,7 +77,7 @@ const meetingWorker = new Worker(
         where: { id: meetingId },
         data: {
           status: 'RECORDING',
-          startedAt: new Date(),
+          actualStart: new Date(),
         },
       });
 
@@ -65,7 +92,7 @@ const meetingWorker = new Worker(
         where: { id: meetingId },
         data: {
           status: 'PROCESSING',
-          endedAt: new Date(),
+          actualEnd: new Date(),
         },
       });
 
@@ -73,7 +100,8 @@ const meetingWorker = new Worker(
       await prisma.recording.create({
         data: {
           meetingId,
-          fileUrl: recordingPath,
+          videoUrl: recordingPath,
+          status: 'PROCESSING',
         },
       });
 
@@ -81,21 +109,39 @@ const meetingWorker = new Worker(
 
       return { success: true, recordingPath };
     } catch (error) {
-      logger.error(`Error in meeting bot: ${error}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Error in meeting bot for ${meetingId}: ${errorMessage}`);
 
-      await prisma.meeting.update({
-        where: { id: meetingId },
-        data: { status: 'FAILED' },
-      });
+      // Update meeting status with error message
+      try {
+        await prisma.meeting.update({
+          where: { id: meetingId },
+          data: {
+            status: 'FAILED',
+            errorMessage: errorMessage.substring(0, 500), // Limit error message length
+          },
+        });
+      } catch (updateError) {
+        logger.error(`Failed to update meeting status: ${updateError}`);
+      }
 
-      await prisma.botSession.update({
-        where: { meetingId },
-        data: { status: 'ERROR' },
-      });
+      // Update bot session status
+      try {
+        await prisma.botSession.update({
+          where: { meetingId },
+          data: { status: 'ERROR' },
+        });
+      } catch (sessionError) {
+        logger.error(`Failed to update bot session: ${sessionError}`);
+      }
 
       throw error;
     } finally {
-      await bot.cleanup();
+      try {
+        await bot.cleanup();
+      } catch (cleanupError) {
+        logger.error(`Error during bot cleanup: ${cleanupError}`);
+      }
     }
   },
   {

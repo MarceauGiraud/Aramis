@@ -1,12 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@aramis/database';
 
+// TODO: Replace with actual auth when implemented
+async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
+  // Placeholder: will be replaced with session/token auth
+  return 'demo-user';
+}
+
+// Verify user owns the meeting
+async function verifyMeetingOwnership(meetingId: string, userId: string): Promise<boolean> {
+  const meeting = await prisma.meeting.findUnique({
+    where: { id: meetingId },
+    select: { userId: true },
+  });
+  return meeting?.userId === userId;
+}
+
 // GET /api/meetings/:id - Get a single meeting
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
+    // Validate meeting ID format (CUID)
+    if (!params.id || !/^c[a-z0-9]{24}$/i.test(params.id)) {
+      return NextResponse.json(
+        { error: 'Invalid meeting ID format' },
+        { status: 400 }
+      );
+    }
+
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
       include: {
@@ -53,11 +76,26 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const meeting = await prisma.meeting.findUnique({
-      where: { id: params.id },
-    });
+    // Validate meeting ID format
+    if (!params.id || !/^c[a-z0-9]{24}$/i.test(params.id)) {
+      return NextResponse.json(
+        { error: 'Invalid meeting ID format' },
+        { status: 400 }
+      );
+    }
 
-    if (!meeting) {
+    // Get current user
+    const userId = await getCurrentUserId(request);
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
+    // Verify ownership
+    const isOwner = await verifyMeetingOwnership(params.id, userId);
+    if (!isOwner) {
       return NextResponse.json(
         { error: 'Meeting not found' },
         { status: 404 }
@@ -85,15 +123,50 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   try {
-    const body = await request.json();
+    // Validate meeting ID format
+    if (!params.id || !/^c[a-z0-9]{24}$/i.test(params.id)) {
+      return NextResponse.json(
+        { error: 'Invalid meeting ID format' },
+        { status: 400 }
+      );
+    }
+
+    // Get current user
+    const userId = await getCurrentUserId(request);
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
+    // Parse and validate body
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid JSON body' },
+        { status: 400 }
+      );
+    }
+
     const { status, title, recordingEnabled } = body;
+
+    // Validate title if provided
+    if (title !== undefined && (typeof title !== 'string' || title.length > 255)) {
+      return NextResponse.json(
+        { error: 'Title must be a string with max 255 characters' },
+        { status: 400 }
+      );
+    }
 
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
       include: { botSession: true },
     });
 
-    if (!meeting) {
+    if (!meeting || meeting.userId !== userId) {
       return NextResponse.json(
         { error: 'Meeting not found' },
         { status: 404 }
