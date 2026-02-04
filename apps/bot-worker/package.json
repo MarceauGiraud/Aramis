@@ -6,12 +6,15 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "setup": "playwright install chromium"
   },
   "dependencies": {
     "@aramis/database": "workspace:*",
     "@aramis/shared": "workspace:*",
     "@aws-sdk/client-s3": "^3.490.0",
+    "@aws-sdk/lib-storage": "^3.490.0",
+    "@aws-sdk/s3-request-presigner": "^3.490.0",
     "bullmq": "^5.1.0",
     "dotenv": "^16.3.1",
     "ioredis": "^5.3.2",
