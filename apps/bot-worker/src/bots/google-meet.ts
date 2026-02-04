@@ -12,6 +12,8 @@ import { logger } from '../lib/logger';
  */
 export class GoogleMeetBot extends BaseMeetingBot {
   private joinedSuccessfully = false;
+  private joinedAt: Date | null = null;
+  private lastKnownParticipantCount = 0;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
     super(config, options);
@@ -89,6 +91,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
     }
 
     this.joinedSuccessfully = true;
+    this.joinedAt = new Date();
     logger.info('Successfully joined Google Meet');
     await this.takeDebugScreenshot('07_joined_successfully');
 
@@ -463,10 +466,31 @@ export class GoogleMeetBot extends BaseMeetingBot {
       return true;
     }
 
+    // Only check participant count after being in the meeting for at least 60 seconds
+    // This prevents false positives when the UI hasn't fully loaded participant info
+    const minTimeInMeeting = 60 * 1000; // 60 seconds
+    if (this.joinedAt) {
+      const timeInMeeting = Date.now() - this.joinedAt.getTime();
+      if (timeInMeeting < minTimeInMeeting) {
+        logger.debug(`Skipping participant count check (only ${Math.floor(timeInMeeting / 1000)}s in meeting)`);
+        return false;
+      }
+    }
+
     // Check if the bot is the only participant left
     const participantCount = await this.getParticipantCount();
-    if (participantCount <= 1) {
-      logger.info(`Meeting ended: Bot is the only participant (count: ${participantCount})`);
+
+    // Track the highest participant count we've seen
+    if (participantCount > this.lastKnownParticipantCount) {
+      this.lastKnownParticipantCount = participantCount;
+      logger.info(`Participant count updated: ${participantCount}`);
+    }
+
+    // Only leave if:
+    // 1. We've seen more than 1 participant at some point (others were present)
+    // 2. Now there's only 1 participant (just the bot)
+    if (participantCount <= 1 && this.lastKnownParticipantCount > 1) {
+      logger.info(`Meeting ended: Bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`);
       // Leave the meeting gracefully
       await this.leave();
       return true;
