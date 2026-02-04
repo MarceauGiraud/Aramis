@@ -43,3 +43,6 @@ uploads/
 # Prisma
 prisma/*.db
 prisma/*.db-journal
+
+#lh
+.lh
