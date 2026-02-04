@@ -30,50 +30,64 @@ export class GoogleMeetBot extends BaseMeetingBot {
       timeout: 60000,
     });
 
-    // Wait for page to load
-    await this.sleep(3000);
+    // Wait for page to load with random delay (human-like)
+    await this.sleep(2000 + Math.random() * 2000);
     await this.takeDebugScreenshot('01_page_loaded');
 
     // Handle "Got it" button for any prompts
-    const gotItBtn = await this.page.$('text=Got it');
-    if (gotItBtn) {
-      await gotItBtn.click();
-      await this.sleep(1000);
+    if (await this.page.$('text=Got it')) {
+      await this.humanClick('text=Got it');
+      await this.sleep(500 + Math.random() * 500);
     }
 
     // Dismiss any other popups
-    const dismissBtn = await this.page.$('[aria-label="Dismiss"]');
-    if (dismissBtn) {
-      await dismissBtn.click();
-      await this.sleep(500);
+    if (await this.page.$('[aria-label="Dismiss"]')) {
+      await this.humanClick('[aria-label="Dismiss"]');
+      await this.sleep(300 + Math.random() * 300);
     }
 
     await this.takeDebugScreenshot('02_after_popups');
 
-    // Enter name if required (for guests)
-    const nameInput = await this.page.$('input[placeholder="Your name"], input[aria-label="Your name"]');
-    if (nameInput) {
-      await nameInput.fill(this.config.botName);
-      logger.info(`Entered name: ${this.config.botName}`);
-      await this.takeDebugScreenshot('03_name_entered');
+    // Enter name if required (for guests) - type like a human
+    const nameSelectors = [
+      'input[placeholder="Your name"]',
+      'input[aria-label="Your name"]',
+      'input[aria-label="Votre nom"]',  // French
+    ];
+
+    for (const nameSelector of nameSelectors) {
+      const nameInput = await this.page.$(nameSelector);
+      if (nameInput) {
+        // Click the input first
+        await this.humanClick(nameSelector);
+        await this.sleep(200 + Math.random() * 200);
+
+        // Type the name with human-like delays
+        await this.typeWithDelay(nameSelector, this.config.botName, 50 + Math.random() * 50);
+        logger.info(`Entered name: ${this.config.botName}`);
+        await this.takeDebugScreenshot('03_name_entered');
+        break;
+      }
     }
 
     // Turn off camera
     await this.turnOffCamera();
+    await this.sleep(300 + Math.random() * 300);
 
     // Turn off microphone
     await this.turnOffMicrophone();
+    await this.sleep(300 + Math.random() * 300);
 
     await this.takeDebugScreenshot('04_before_join');
 
-    // Click "Ask to join" or "Join now" button - try multiple selectors
+    // Click "Ask to join" or "Join now" button - try multiple selectors with human-like click
     const joinSelectors = [
       'button:has-text("Ask to join")',
       'button:has-text("Join now")',
-      'button:has-text("Participer")',      // French
+      'button:has-text("Participer")',           // French
       'button:has-text("Demander à rejoindre")', // French
       '[data-idom-class*="join"]',
-      '[jsname="Qx7uuf"]',  // Common jsname for join button
+      '[jsname="Qx7uuf"]',
       'button[data-mdc-dialog-action="join"]',
     ];
 
@@ -82,11 +96,14 @@ export class GoogleMeetBot extends BaseMeetingBot {
       try {
         const joinBtn = await this.page.$(selector);
         if (joinBtn) {
-          await joinBtn.click();
-          logger.info(`Clicked Join button with selector: ${selector}`);
-          await this.takeDebugScreenshot('05_join_clicked');
-          joinClicked = true;
-          break;
+          // Human-like click with mouse movement
+          const clicked = await this.humanClick(selector);
+          if (clicked) {
+            logger.info(`Clicked Join button with selector: ${selector}`);
+            await this.takeDebugScreenshot('05_join_clicked');
+            joinClicked = true;
+            break;
+          }
         }
       } catch {
         // Try next selector
@@ -96,15 +113,19 @@ export class GoogleMeetBot extends BaseMeetingBot {
     if (!joinClicked) {
       logger.warn('Could not find Join button with any selector');
       await this.takeDebugScreenshot('05_no_join_button');
-      // Check if we need to sign in
-      const signInRequired = await this.page.$('text=Sign in, text=Connexion');
-      if (signInRequired) {
+
+      // Check if we're blocked or need to sign in
+      const pageContent = await this.page.content();
+      if (pageContent.includes("can't join") || pageContent.includes('cannot join')) {
+        throw new Error('Google Meet: Cannot join this meeting (access denied or meeting restrictions)');
+      }
+      if (await this.page.$('text=Sign in') || await this.page.$('text=Connexion')) {
         throw new Error('Google Meet requires sign-in for this meeting');
       }
     }
 
-    // Wait a bit after clicking join
-    await this.sleep(3000);
+    // Wait a bit after clicking join (with randomness)
+    await this.sleep(2000 + Math.random() * 2000);
 
     // Wait to be admitted (if needed)
     await this.waitForAdmission();
@@ -128,42 +149,50 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private async turnOffCamera(): Promise<void> {
     if (!this.page) return;
 
-    // Find camera button - could have different states
-    const cameraBtn = await this.page.$('[aria-label*="camera" i], [data-is-muted="false"][aria-label*="video" i]');
-    if (cameraBtn) {
-      const isMuted = await cameraBtn.getAttribute('data-is-muted');
-      if (isMuted !== 'true') {
-        await cameraBtn.click();
-        logger.info('Turned off camera');
-      }
-    }
+    const cameraSelectors = [
+      '[aria-label*="Turn off camera" i]',
+      '[aria-label*="Désactiver la caméra" i]',  // French
+      '[data-is-muted="false"][aria-label*="camera" i]',
+      '[data-is-muted="false"][aria-label*="video" i]',
+      '[jsname="BOHaEe"]',
+    ];
 
-    // Alternative selector for pre-join screen
-    const preJoinCamera = await this.page.$('[jsname="BOHaEe"], [aria-label*="Turn off camera"]');
-    if (preJoinCamera) {
-      await preJoinCamera.click();
-      logger.info('Turned off camera (pre-join)');
+    for (const selector of cameraSelectors) {
+      try {
+        const cameraBtn = await this.page.$(selector);
+        if (cameraBtn) {
+          await this.humanClick(selector);
+          logger.info('Turned off camera');
+          return;
+        }
+      } catch {
+        // Try next selector
+      }
     }
   }
 
   private async turnOffMicrophone(): Promise<void> {
     if (!this.page) return;
 
-    // Find microphone button
-    const micBtn = await this.page.$('[aria-label*="microphone" i], [data-is-muted="false"][aria-label*="mic" i]');
-    if (micBtn) {
-      const isMuted = await micBtn.getAttribute('data-is-muted');
-      if (isMuted !== 'true') {
-        await micBtn.click();
-        logger.info('Turned off microphone');
-      }
-    }
+    const micSelectors = [
+      '[aria-label*="Turn off microphone" i]',
+      '[aria-label*="Désactiver le micro" i]',  // French
+      '[data-is-muted="false"][aria-label*="microphone" i]',
+      '[data-is-muted="false"][aria-label*="mic" i]',
+      '[jsname="Dg9Wp"]',
+    ];
 
-    // Alternative selector for pre-join screen
-    const preJoinMic = await this.page.$('[jsname="Dg9Wp"], [aria-label*="Turn off microphone"]');
-    if (preJoinMic) {
-      await preJoinMic.click();
-      logger.info('Turned off microphone (pre-join)');
+    for (const selector of micSelectors) {
+      try {
+        const micBtn = await this.page.$(selector);
+        if (micBtn) {
+          await this.humanClick(selector);
+          logger.info('Turned off microphone');
+          return;
+        }
+      } catch {
+        // Try next selector
+      }
     }
   }
 
