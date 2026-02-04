@@ -1,4 +1,4 @@
-import { BaseMeetingBot, BotConfig } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions } from './base';
 import { logger } from '../lib/logger';
 
 /**
@@ -11,8 +11,10 @@ import { logger } from '../lib/logger';
  * guests are allowed to join.
  */
 export class GoogleMeetBot extends BaseMeetingBot {
-  constructor(config: BotConfig) {
-    super(config);
+  private joinedSuccessfully = false;
+
+  constructor(config: BotConfig, options: BotOptions = {}) {
+    super(config, options);
   }
 
   async join(): Promise<void> {
@@ -30,6 +32,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     // Wait for page to load
     await this.sleep(3000);
+    await this.takeDebugScreenshot('01_page_loaded');
 
     // Handle "Got it" button for any prompts
     const gotItBtn = await this.page.$('text=Got it');
@@ -45,11 +48,14 @@ export class GoogleMeetBot extends BaseMeetingBot {
       await this.sleep(500);
     }
 
+    await this.takeDebugScreenshot('02_after_popups');
+
     // Enter name if required (for guests)
     const nameInput = await this.page.$('input[placeholder="Your name"], input[aria-label="Your name"]');
     if (nameInput) {
       await nameInput.fill(this.config.botName);
       logger.info(`Entered name: ${this.config.botName}`);
+      await this.takeDebugScreenshot('03_name_entered');
     }
 
     // Turn off camera
@@ -58,23 +64,33 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Turn off microphone
     await this.turnOffMicrophone();
 
+    await this.takeDebugScreenshot('04_before_join');
+
     // Click "Ask to join" or "Join now" button
     const joinBtn = await this.page.$('button:has-text("Ask to join"), button:has-text("Join now"), [data-idom-class*="join"]');
     if (joinBtn) {
       await joinBtn.click();
       logger.info('Clicked Join button');
+      await this.takeDebugScreenshot('05_join_clicked');
+    } else {
+      logger.warn('Could not find Join button');
+      await this.takeDebugScreenshot('05_no_join_button');
     }
 
     // Wait to be admitted (if needed)
     await this.waitForAdmission();
+    await this.takeDebugScreenshot('06_after_admission');
 
     // Verify we're in the meeting
     const inMeeting = await this.checkStillInMeeting();
     if (!inMeeting) {
+      await this.takeDebugScreenshot('07_join_failed');
       throw new Error('Failed to join Google Meet');
     }
 
+    this.joinedSuccessfully = true;
     logger.info('Successfully joined Google Meet');
+    await this.takeDebugScreenshot('07_joined_successfully');
 
     // Start recording
     await this.startRecording();
@@ -157,14 +173,29 @@ export class GoogleMeetBot extends BaseMeetingBot {
       'text=You left the meeting',
       'text=The call has ended',
       'text=Return to home screen',
+      'text=You\'ve been removed from the meeting',
+      'text=This meeting has ended',
       '[data-call-ended="true"]',
     ];
 
     for (const indicator of endedIndicators) {
-      const element = await this.page.$(indicator);
-      if (element) {
-        return true;
+      try {
+        const element = await this.page.$(indicator);
+        if (element) {
+          logger.info(`Meeting ended: found indicator ${indicator}`);
+          return true;
+        }
+      } catch {
+        // Ignore selector errors
       }
+    }
+
+    // Check if we're no longer on a meeting URL
+    const url = this.page.url();
+    if (!url.includes('meet.google.com/') || url.includes('meet.google.com/?')) {
+      // Redirected away from meeting
+      logger.info(`Meeting ended: URL changed to ${url}`);
+      return true;
     }
 
     return false;
@@ -173,25 +204,62 @@ export class GoogleMeetBot extends BaseMeetingBot {
   async checkStillInMeeting(): Promise<boolean> {
     if (!this.page) return false;
 
-    // Check for meeting indicators
+    // Check for meeting indicators - these indicate we're in the actual meeting
     const meetingIndicators = [
       '[data-meeting-title]', // Meeting title
       '[data-self-name]', // Self video
       '[jscontroller="kAPMuc"]', // Main meeting container
       '[data-participant-id]', // Any participant
       '[aria-label*="Leave call"]', // Leave button
+      '[aria-label*="leave" i]', // Alternative leave button
+      '[data-call-active="true"]', // Active call indicator
+      // Video grid indicators
+      '[data-allocation-index]', // Participant tiles
+      '[data-requested-participant-id]', // Participant in grid
     ];
 
     for (const indicator of meetingIndicators) {
-      const element = await this.page.$(indicator);
-      if (element) {
-        return true;
+      try {
+        const element = await this.page.$(indicator);
+        if (element) {
+          logger.info(`In meeting: found indicator ${indicator}`);
+          return true;
+        }
+      } catch {
+        // Ignore selector errors
+      }
+    }
+
+    // Check for common meeting UI elements using text content
+    const textIndicators = [
+      'text=Present now',
+      'text=You',
+      'text=Meeting details',
+    ];
+
+    for (const indicator of textIndicators) {
+      try {
+        const element = await this.page.$(indicator);
+        if (element) {
+          logger.info(`In meeting: found text indicator ${indicator}`);
+          return true;
+        }
+      } catch {
+        // Ignore selector errors
       }
     }
 
     // Check URL - must still be on meet.google.com with a meeting code
     const url = this.page.url();
-    return url.includes('meet.google.com/') && /\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i.test(url);
+    const urlMatch = url.includes('meet.google.com/') && /\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i.test(url);
+
+    // If we've joined successfully before, trust the URL check
+    if (this.joinedSuccessfully && urlMatch) {
+      return true;
+    }
+
+    logger.info(`Not in meeting: no indicators found, url=${url}`);
+    return false;
   }
 
   async leave(): Promise<void> {

@@ -16,17 +16,30 @@ export interface RecordingOptions {
   format?: 'webm' | 'mp4';
 }
 
+export interface BotOptions {
+  headless?: boolean;
+  debug?: boolean;
+  screenshotDir?: string;
+}
+
 export abstract class BaseMeetingBot {
   protected browser: Browser | null = null;
   protected context: BrowserContext | null = null;
   protected page: Page | null = null;
   protected config: BotConfig;
+  protected options: BotOptions;
   protected isRecording = false;
   protected recordingPath: string | null = null;
   protected startTime: Date | null = null;
+  protected screenshotCounter = 0;
 
-  constructor(config: BotConfig) {
+  constructor(config: BotConfig, options: BotOptions = {}) {
     this.config = config;
+    this.options = {
+      headless: options.headless ?? (process.env.BOT_HEADLESS !== 'false'),
+      debug: options.debug ?? (process.env.BOT_DEBUG === 'true'),
+      screenshotDir: options.screenshotDir ?? '/tmp/bot-screenshots',
+    };
   }
 
   /**
@@ -34,9 +47,10 @@ export abstract class BaseMeetingBot {
    */
   async initialize(): Promise<void> {
     logger.info(`Initializing bot for meeting: ${this.config.meetingId}`);
+    logger.info(`Bot options: headless=${this.options.headless}, debug=${this.options.debug}`);
 
     this.browser = await chromium.launch({
-      headless: true,
+      headless: this.options.headless,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -232,6 +246,29 @@ export abstract class BaseMeetingBot {
    */
   protected sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Take a debug screenshot (only if debug mode is enabled)
+   */
+  protected async takeDebugScreenshot(name: string): Promise<void> {
+    if (!this.options.debug || !this.page) return;
+
+    try {
+      const dir = this.options.screenshotDir!;
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      this.screenshotCounter++;
+      const filename = `${this.config.meetingId}_${this.screenshotCounter.toString().padStart(3, '0')}_${name}.png`;
+      const filepath = path.join(dir, filename);
+
+      await this.page.screenshot({ path: filepath, fullPage: true });
+      logger.info(`Screenshot saved: ${filepath}`);
+    } catch (error) {
+      logger.warn(`Failed to take screenshot: ${error}`);
+    }
   }
 
   /**
