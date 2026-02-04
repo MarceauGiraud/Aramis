@@ -34,105 +34,31 @@ export class GoogleMeetBot extends BaseMeetingBot {
     await this.sleep(2000 + Math.random() * 2000);
     await this.takeDebugScreenshot('01_page_loaded');
 
-    // Handle "Got it" button for any prompts
-    if (await this.page.$('text=Got it')) {
-      await this.humanClick('text=Got it');
-      await this.sleep(500 + Math.random() * 500);
-    }
-
-    // Dismiss any other popups
-    if (await this.page.$('[aria-label="Dismiss"]')) {
-      await this.humanClick('[aria-label="Dismiss"]');
-      await this.sleep(300 + Math.random() * 300);
-    }
+    // Handle all popups and dialogs first
+    await this.handlePopups();
 
     await this.takeDebugScreenshot('02_after_popups');
 
-    // FIRST: Turn off camera and microphone BEFORE entering name
-    // This prevents the green loading screen
+    // Turn off camera and microphone
     await this.turnOffCamera();
-    await this.sleep(500 + Math.random() * 300);
+    await this.sleep(300 + Math.random() * 200);
     await this.turnOffMicrophone();
-    await this.sleep(500 + Math.random() * 300);
+    await this.sleep(300 + Math.random() * 200);
 
     await this.takeDebugScreenshot('02b_media_off');
 
     // Enter name if required (for guests) - type like a human
-    const nameSelectors = [
-      'input[placeholder="Your name"]',
-      'input[aria-label="Your name"]',
-      'input[placeholder="Votre nom"]',  // French
-      'input[aria-label="Votre nom"]',   // French
-      'input[type="text"]',              // Generic fallback
-    ];
-
-    let nameEntered = false;
-    for (const nameSelector of nameSelectors) {
-      try {
-        const nameInput = await this.page.$(nameSelector);
-        if (nameInput) {
-          // Clear any existing text first
-          await nameInput.click({ clickCount: 3 }); // Select all
-          await this.sleep(100);
-
-          // Type the name character by character
-          await nameInput.fill(''); // Clear
-          await this.sleep(100);
-
-          // Type with human-like delays
-          for (const char of this.config.botName) {
-            await nameInput.type(char, { delay: 30 + Math.random() * 50 });
-          }
-
-          logger.info(`Entered name: ${this.config.botName}`);
-          await this.takeDebugScreenshot('03_name_entered');
-          nameEntered = true;
-          break;
-        }
-      } catch (e) {
-        logger.warn(`Failed to enter name with selector ${nameSelector}: ${e}`);
-      }
-    }
-
-    if (!nameEntered) {
-      logger.warn('Could not find name input field');
-    }
+    await this.enterName();
 
     // Double-check camera and mic are off after name entry
+    await this.sleep(500);
     await this.turnOffCamera();
     await this.turnOffMicrophone();
 
     await this.takeDebugScreenshot('04_before_join');
 
-    // Click "Ask to join" or "Join now" button - try multiple selectors with human-like click
-    const joinSelectors = [
-      'button:has-text("Ask to join")',
-      'button:has-text("Join now")',
-      'button:has-text("Participer")',           // French
-      'button:has-text("Demander à rejoindre")', // French
-      '[data-idom-class*="join"]',
-      '[jsname="Qx7uuf"]',
-      'button[data-mdc-dialog-action="join"]',
-    ];
-
-    let joinClicked = false;
-    for (const selector of joinSelectors) {
-      try {
-        const joinBtn = await this.page.$(selector);
-        if (joinBtn) {
-          // Human-like click with mouse movement
-          const clicked = await this.humanClick(selector);
-          if (clicked) {
-            logger.info(`Clicked Join button with selector: ${selector}`);
-            await this.takeDebugScreenshot('05_join_clicked');
-            joinClicked = true;
-            break;
-          }
-        }
-      } catch {
-        // Try next selector
-      }
-    }
+    // Click "Ask to join" or "Join now" button
+    const joinClicked = await this.clickJoinButton();
 
     if (!joinClicked) {
       logger.warn('Could not find Join button with any selector');
@@ -168,6 +94,145 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     // Start recording
     await this.startRecording();
+  }
+
+  /**
+   * Handle all popups and permission dialogs
+   */
+  private async handlePopups(): Promise<void> {
+    if (!this.page) return;
+
+    // Common popup/dialog dismiss buttons
+    const popupSelectors = [
+      'text=Got it',
+      'text=OK',
+      'text=Compris',           // French "Got it"
+      'text=Allow',
+      'text=Autoriser',         // French "Allow"
+      '[aria-label="Dismiss"]',
+      '[aria-label="Close"]',
+      '[aria-label="Fermer"]',  // French "Close"
+      'button:has-text("Dismiss")',
+      'button:has-text("Close")',
+      // Camera/Mic permission dialogs
+      'button:has-text("Allow")',
+      'button:has-text("Block")',  // Click block to deny camera if needed
+    ];
+
+    for (const selector of popupSelectors) {
+      try {
+        const popup = await this.page.$(selector);
+        if (popup) {
+          await this.humanClick(selector);
+          logger.info(`Dismissed popup: ${selector}`);
+          await this.sleep(300 + Math.random() * 200);
+        }
+      } catch {
+        // Continue to next selector
+      }
+    }
+
+    // Handle Google's "Use camera" prompt by clicking outside or pressing Escape
+    try {
+      const cameraPrompt = await this.page.$('text=Use your camera');
+      if (cameraPrompt) {
+        await this.page.keyboard.press('Escape');
+        logger.info('Escaped camera prompt');
+        await this.sleep(500);
+      }
+    } catch {
+      // Ignore
+    }
+
+    // Also check for French camera prompt
+    try {
+      const cameraPromptFr = await this.page.$('text=Utiliser votre caméra');
+      if (cameraPromptFr) {
+        await this.page.keyboard.press('Escape');
+        logger.info('Escaped camera prompt (French)');
+        await this.sleep(500);
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  /**
+   * Enter the bot name in the name field
+   */
+  private async enterName(): Promise<void> {
+    if (!this.page) return;
+
+    const nameSelectors = [
+      'input[placeholder="Your name"]',
+      'input[aria-label="Your name"]',
+      'input[placeholder="Votre nom"]',
+      'input[aria-label="Votre nom"]',
+      'input[data-placeholder="Your name"]',
+    ];
+
+    for (const nameSelector of nameSelectors) {
+      try {
+        const nameInput = await this.page.$(nameSelector);
+        if (nameInput) {
+          // Click the input field first
+          await nameInput.click();
+          await this.sleep(200 + Math.random() * 100);
+
+          // Clear any existing text
+          await nameInput.fill('');
+          await this.sleep(100);
+
+          // Type with human-like delays
+          for (const char of this.config.botName) {
+            await nameInput.type(char, { delay: 40 + Math.random() * 60 });
+          }
+
+          logger.info(`Entered name: ${this.config.botName}`);
+          await this.takeDebugScreenshot('03_name_entered');
+          return;
+        }
+      } catch (e) {
+        logger.warn(`Failed to enter name with selector ${nameSelector}: ${e}`);
+      }
+    }
+
+    logger.warn('Could not find name input field');
+  }
+
+  /**
+   * Click the join button
+   */
+  private async clickJoinButton(): Promise<boolean> {
+    if (!this.page) return false;
+
+    const joinSelectors = [
+      'button:has-text("Ask to join")',
+      'button:has-text("Join now")',
+      'button:has-text("Participer")',
+      'button:has-text("Demander à rejoindre")',
+      '[data-idom-class*="join"]',
+      '[jsname="Qx7uuf"]',
+      'button[data-mdc-dialog-action="join"]',
+    ];
+
+    for (const selector of joinSelectors) {
+      try {
+        const joinBtn = await this.page.$(selector);
+        if (joinBtn) {
+          const clicked = await this.humanClick(selector);
+          if (clicked) {
+            logger.info(`Clicked Join button with selector: ${selector}`);
+            await this.takeDebugScreenshot('05_join_clicked');
+            return true;
+          }
+        }
+      } catch {
+        // Try next selector
+      }
+    }
+
+    return false;
   }
 
   private async turnOffCamera(): Promise<void> {
@@ -277,21 +342,74 @@ export class GoogleMeetBot extends BaseMeetingBot {
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitTime) {
+      // Check if we've been kicked out or denied
+      const kickedOutIndicators = [
+        'text=You can\'t join this video call',
+        'text=Vous ne pouvez pas rejoindre',
+        'text=denied',
+        'text=removed',
+        'text=kicked',
+      ];
+
+      for (const indicator of kickedOutIndicators) {
+        try {
+          const kicked = await this.page.$(indicator);
+          if (kicked) {
+            throw new Error('Bot was denied entry or kicked from waiting room');
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes('denied')) {
+            throw e;
+          }
+          // Ignore selector errors
+        }
+      }
+
       // Check if we're in the meeting
       const inMeeting = await this.checkStillInMeeting();
       if (inMeeting) {
+        logger.info('Successfully admitted to meeting');
         return;
       }
 
-      // Check if we're waiting to be admitted
-      const waitingText = await this.page.$('text=Waiting for someone to let you in');
-      if (!waitingText) {
-        // Not waiting anymore
+      // Check if we're waiting to be admitted (multiple languages)
+      const waitingIndicators = [
+        'text=Waiting for someone to let you in',
+        'text=Asking to be let in',
+        'text=En attente',
+        'text=Demande en cours',
+      ];
+
+      let isWaiting = false;
+      for (const indicator of waitingIndicators) {
+        try {
+          const waiting = await this.page.$(indicator);
+          if (waiting) {
+            isWaiting = true;
+            break;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      if (!isWaiting) {
+        // Not waiting anymore - either admitted or something else happened
         return;
       }
 
       logger.info('Waiting to be admitted to the meeting...');
-      await this.sleep(5000);
+
+      // Simulate human-like behavior while waiting (small random mouse movements)
+      if (Math.random() > 0.7) {
+        const viewport = this.page.viewportSize() || { width: 1920, height: 1080 };
+        await this.page.mouse.move(
+          viewport.width / 2 + (Math.random() - 0.5) * 100,
+          viewport.height / 2 + (Math.random() - 0.5) * 100
+        );
+      }
+
+      await this.sleep(3000 + Math.random() * 2000);
     }
 
     throw new Error('Timed out waiting to be admitted');
