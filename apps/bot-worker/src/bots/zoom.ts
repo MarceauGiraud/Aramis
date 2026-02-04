@@ -1,4 +1,4 @@
-import { BaseMeetingBot, BotConfig } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions } from './base';
 import { logger } from '../lib/logger';
 
 /**
@@ -7,8 +7,8 @@ import { logger } from '../lib/logger';
  * Joins Zoom meetings via web client and records audio/video
  */
 export class ZoomBot extends BaseMeetingBot {
-  constructor(config: BotConfig) {
-    super(config);
+  constructor(config: BotConfig, options?: BotOptions) {
+    super(config, options);
   }
 
   async join(): Promise<void> {
