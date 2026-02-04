@@ -67,17 +67,21 @@ export abstract class BaseMeetingBot {
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
         '--disable-blink-features=AutomationControlled',
-        // Don't use fake devices - just auto-accept permissions but keep camera/mic off
+        // Use fake media devices to avoid permission popups
         '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        // Use a black/silent fake device instead of default green
+        '--use-file-for-fake-video-capture=/dev/null',
+        '--use-file-for-fake-audio-capture=/dev/null',
         '--autoplay-policy=no-user-gesture-required',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
       ],
     });
 
-    // Use incognito context - only grant microphone for listening (not camera)
+    // Use incognito context with both permissions to avoid popups
     this.context = await this.browser.newContext({
-      permissions: ['microphone'],  // Only microphone, no camera
+      permissions: ['microphone', 'camera'],
       viewport: { width: 1920, height: 1080 },
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
