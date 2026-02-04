@@ -66,16 +66,45 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     await this.takeDebugScreenshot('04_before_join');
 
-    // Click "Ask to join" or "Join now" button
-    const joinBtn = await this.page.$('button:has-text("Ask to join"), button:has-text("Join now"), [data-idom-class*="join"]');
-    if (joinBtn) {
-      await joinBtn.click();
-      logger.info('Clicked Join button');
-      await this.takeDebugScreenshot('05_join_clicked');
-    } else {
-      logger.warn('Could not find Join button');
-      await this.takeDebugScreenshot('05_no_join_button');
+    // Click "Ask to join" or "Join now" button - try multiple selectors
+    const joinSelectors = [
+      'button:has-text("Ask to join")',
+      'button:has-text("Join now")',
+      'button:has-text("Participer")',      // French
+      'button:has-text("Demander à rejoindre")', // French
+      '[data-idom-class*="join"]',
+      '[jsname="Qx7uuf"]',  // Common jsname for join button
+      'button[data-mdc-dialog-action="join"]',
+    ];
+
+    let joinClicked = false;
+    for (const selector of joinSelectors) {
+      try {
+        const joinBtn = await this.page.$(selector);
+        if (joinBtn) {
+          await joinBtn.click();
+          logger.info(`Clicked Join button with selector: ${selector}`);
+          await this.takeDebugScreenshot('05_join_clicked');
+          joinClicked = true;
+          break;
+        }
+      } catch {
+        // Try next selector
+      }
     }
+
+    if (!joinClicked) {
+      logger.warn('Could not find Join button with any selector');
+      await this.takeDebugScreenshot('05_no_join_button');
+      // Check if we need to sign in
+      const signInRequired = await this.page.$('text=Sign in, text=Connexion');
+      if (signInRequired) {
+        throw new Error('Google Meet requires sign-in for this meeting');
+      }
+    }
+
+    // Wait a bit after clicking join
+    await this.sleep(3000);
 
     // Wait to be admitted (if needed)
     await this.waitForAdmission();
@@ -168,11 +197,15 @@ export class GoogleMeetBot extends BaseMeetingBot {
   async checkMeetingEnded(): Promise<boolean> {
     if (!this.page) return true;
 
+    // Only check for ended if we actually joined successfully
+    if (!this.joinedSuccessfully) {
+      return false;
+    }
+
     // Check for meeting ended indicators
     const endedIndicators = [
       'text=You left the meeting',
       'text=The call has ended',
-      'text=Return to home screen',
       'text=You\'ve been removed from the meeting',
       'text=This meeting has ended',
       '[data-call-ended="true"]',
@@ -233,8 +266,8 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Check for common meeting UI elements using text content
     const textIndicators = [
       'text=Present now',
-      'text=You',
       'text=Meeting details',
+      'text=Everyone will see',  // Screen share prompt (only in meeting)
     ];
 
     for (const indicator of textIndicators) {
