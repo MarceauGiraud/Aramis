@@ -12,6 +12,8 @@ import { logger } from '../lib/logger';
  */
 export class GoogleMeetBot extends BaseMeetingBot {
   private joinedSuccessfully = false;
+  private joinedAt: Date | null = null;
+  private lastKnownParticipantCount = 0;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
     super(config, options);
@@ -89,6 +91,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
     }
 
     this.joinedSuccessfully = true;
+    this.joinedAt = new Date();
     logger.info('Successfully joined Google Meet');
     await this.takeDebugScreenshot('07_joined_successfully');
 
@@ -238,23 +241,23 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private async turnOffCamera(): Promise<void> {
     if (!this.page) return;
 
-    // Selectors for camera buttons that indicate camera is ON (need to turn off)
-    const cameraOnSelectors = [
+    // All possible camera button selectors - try each one
+    const cameraSelectors = [
       '[aria-label*="Turn off camera" i]',
       '[aria-label*="Désactiver la caméra" i]',  // French
-      '[aria-label*="camera is on" i]',
-      '[data-is-muted="false"][aria-label*="camera" i]',
+      '[aria-label*="camera" i][data-is-muted="false"]',
       '[data-is-muted="false"][aria-label*="video" i]',
+      '[jsname="BOHaEe"]',  // Pre-join camera button
+      'button[aria-label*="camera" i]',
+      '[role="button"][aria-label*="camera" i]',
     ];
 
-    // Try to find and click camera button that's currently ON
-    for (const selector of cameraOnSelectors) {
+    for (const selector of cameraSelectors) {
       try {
         const cameraBtn = await this.page.$(selector);
         if (cameraBtn) {
           await this.humanClick(selector);
-          logger.info('Turned off camera');
-          await this.sleep(300);
+          logger.info(`Turned off camera with selector: ${selector}`);
           return;
         }
       } catch {
@@ -262,49 +265,30 @@ export class GoogleMeetBot extends BaseMeetingBot {
       }
     }
 
-    // Fallback: try jsname selectors (pre-join screen)
-    const fallbackSelectors = ['[jsname="BOHaEe"]', '[jsname="jmtvPd"]'];
-    for (const selector of fallbackSelectors) {
-      try {
-        const btn = await this.page.$(selector);
-        if (btn) {
-          // Check if it's not already muted
-          const ariaLabel = await btn.getAttribute('aria-label');
-          if (ariaLabel && !ariaLabel.toLowerCase().includes('turn on')) {
-            await this.humanClick(selector);
-            logger.info('Turned off camera (fallback)');
-            await this.sleep(300);
-            return;
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
-
-    logger.info('Camera appears to be already off or not available');
+    // If no camera button found, that's okay - might already be off
+    logger.info('No camera button found (may already be off)');
   }
 
   private async turnOffMicrophone(): Promise<void> {
     if (!this.page) return;
 
-    // Selectors for microphone buttons that indicate mic is ON (need to turn off)
-    const micOnSelectors = [
+    // All possible microphone button selectors - try each one
+    const micSelectors = [
       '[aria-label*="Turn off microphone" i]',
       '[aria-label*="Désactiver le micro" i]',  // French
-      '[aria-label*="microphone is on" i]',
-      '[data-is-muted="false"][aria-label*="microphone" i]',
+      '[aria-label*="microphone" i][data-is-muted="false"]',
       '[data-is-muted="false"][aria-label*="mic" i]',
+      '[jsname="Dg9Wp"]',  // Pre-join mic button
+      'button[aria-label*="microphone" i]',
+      '[role="button"][aria-label*="microphone" i]',
     ];
 
-    // Try to find and click mic button that's currently ON
-    for (const selector of micOnSelectors) {
+    for (const selector of micSelectors) {
       try {
         const micBtn = await this.page.$(selector);
         if (micBtn) {
           await this.humanClick(selector);
-          logger.info('Turned off microphone');
-          await this.sleep(300);
+          logger.info(`Turned off microphone with selector: ${selector}`);
           return;
         }
       } catch {
@@ -312,27 +296,8 @@ export class GoogleMeetBot extends BaseMeetingBot {
       }
     }
 
-    // Fallback: try jsname selectors (pre-join screen)
-    const fallbackSelectors = ['[jsname="Dg9Wp"]', '[jsname="KxPJBe"]'];
-    for (const selector of fallbackSelectors) {
-      try {
-        const btn = await this.page.$(selector);
-        if (btn) {
-          // Check if it's not already muted
-          const ariaLabel = await btn.getAttribute('aria-label');
-          if (ariaLabel && !ariaLabel.toLowerCase().includes('turn on')) {
-            await this.humanClick(selector);
-            logger.info('Turned off microphone (fallback)');
-            await this.sleep(300);
-            return;
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
-
-    logger.info('Microphone appears to be already off or not available');
+    // If no mic button found, that's okay - might already be off
+    logger.info('No microphone button found (may already be off)');
   }
 
   private async waitForAdmission(): Promise<void> {
@@ -501,10 +466,31 @@ export class GoogleMeetBot extends BaseMeetingBot {
       return true;
     }
 
+    // Only check participant count after being in the meeting for at least 60 seconds
+    // This prevents false positives when the UI hasn't fully loaded participant info
+    const minTimeInMeeting = 60 * 1000; // 60 seconds
+    if (this.joinedAt) {
+      const timeInMeeting = Date.now() - this.joinedAt.getTime();
+      if (timeInMeeting < minTimeInMeeting) {
+        logger.debug(`Skipping participant count check (only ${Math.floor(timeInMeeting / 1000)}s in meeting)`);
+        return false;
+      }
+    }
+
     // Check if the bot is the only participant left
     const participantCount = await this.getParticipantCount();
-    if (participantCount <= 1) {
-      logger.info(`Meeting ended: Bot is the only participant (count: ${participantCount})`);
+
+    // Track the highest participant count we've seen
+    if (participantCount > this.lastKnownParticipantCount) {
+      this.lastKnownParticipantCount = participantCount;
+      logger.info(`Participant count updated: ${participantCount}`);
+    }
+
+    // Only leave if:
+    // 1. We've seen more than 1 participant at some point (others were present)
+    // 2. Now there's only 1 participant (just the bot)
+    if (participantCount <= 1 && this.lastKnownParticipantCount > 1) {
+      logger.info(`Meeting ended: Bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`);
       // Leave the meeting gracefully
       await this.leave();
       return true;
