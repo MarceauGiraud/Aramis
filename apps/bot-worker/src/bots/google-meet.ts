@@ -48,35 +48,59 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     await this.takeDebugScreenshot('02_after_popups');
 
+    // FIRST: Turn off camera and microphone BEFORE entering name
+    // This prevents the green loading screen
+    await this.turnOffCamera();
+    await this.sleep(500 + Math.random() * 300);
+    await this.turnOffMicrophone();
+    await this.sleep(500 + Math.random() * 300);
+
+    await this.takeDebugScreenshot('02b_media_off');
+
     // Enter name if required (for guests) - type like a human
     const nameSelectors = [
       'input[placeholder="Your name"]',
       'input[aria-label="Your name"]',
-      'input[aria-label="Votre nom"]',  // French
+      'input[placeholder="Votre nom"]',  // French
+      'input[aria-label="Votre nom"]',   // French
+      'input[type="text"]',              // Generic fallback
     ];
 
+    let nameEntered = false;
     for (const nameSelector of nameSelectors) {
-      const nameInput = await this.page.$(nameSelector);
-      if (nameInput) {
-        // Click the input first
-        await this.humanClick(nameSelector);
-        await this.sleep(200 + Math.random() * 200);
+      try {
+        const nameInput = await this.page.$(nameSelector);
+        if (nameInput) {
+          // Clear any existing text first
+          await nameInput.click({ clickCount: 3 }); // Select all
+          await this.sleep(100);
 
-        // Type the name with human-like delays
-        await this.typeWithDelay(nameSelector, this.config.botName, 50 + Math.random() * 50);
-        logger.info(`Entered name: ${this.config.botName}`);
-        await this.takeDebugScreenshot('03_name_entered');
-        break;
+          // Type the name character by character
+          await nameInput.fill(''); // Clear
+          await this.sleep(100);
+
+          // Type with human-like delays
+          for (const char of this.config.botName) {
+            await nameInput.type(char, { delay: 30 + Math.random() * 50 });
+          }
+
+          logger.info(`Entered name: ${this.config.botName}`);
+          await this.takeDebugScreenshot('03_name_entered');
+          nameEntered = true;
+          break;
+        }
+      } catch (e) {
+        logger.warn(`Failed to enter name with selector ${nameSelector}: ${e}`);
       }
     }
 
-    // Turn off camera
-    await this.turnOffCamera();
-    await this.sleep(300 + Math.random() * 300);
+    if (!nameEntered) {
+      logger.warn('Could not find name input field');
+    }
 
-    // Turn off microphone
+    // Double-check camera and mic are off after name entry
+    await this.turnOffCamera();
     await this.turnOffMicrophone();
-    await this.sleep(300 + Math.random() * 300);
 
     await this.takeDebugScreenshot('04_before_join');
 
@@ -149,51 +173,101 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private async turnOffCamera(): Promise<void> {
     if (!this.page) return;
 
-    const cameraSelectors = [
+    // Selectors for camera buttons that indicate camera is ON (need to turn off)
+    const cameraOnSelectors = [
       '[aria-label*="Turn off camera" i]',
       '[aria-label*="Désactiver la caméra" i]',  // French
+      '[aria-label*="camera is on" i]',
       '[data-is-muted="false"][aria-label*="camera" i]',
       '[data-is-muted="false"][aria-label*="video" i]',
-      '[jsname="BOHaEe"]',
     ];
 
-    for (const selector of cameraSelectors) {
+    // Try to find and click camera button that's currently ON
+    for (const selector of cameraOnSelectors) {
       try {
         const cameraBtn = await this.page.$(selector);
         if (cameraBtn) {
           await this.humanClick(selector);
           logger.info('Turned off camera');
+          await this.sleep(300);
           return;
         }
       } catch {
         // Try next selector
       }
     }
+
+    // Fallback: try jsname selectors (pre-join screen)
+    const fallbackSelectors = ['[jsname="BOHaEe"]', '[jsname="jmtvPd"]'];
+    for (const selector of fallbackSelectors) {
+      try {
+        const btn = await this.page.$(selector);
+        if (btn) {
+          // Check if it's not already muted
+          const ariaLabel = await btn.getAttribute('aria-label');
+          if (ariaLabel && !ariaLabel.toLowerCase().includes('turn on')) {
+            await this.humanClick(selector);
+            logger.info('Turned off camera (fallback)');
+            await this.sleep(300);
+            return;
+          }
+        }
+      } catch {
+        // Continue
+      }
+    }
+
+    logger.info('Camera appears to be already off or not available');
   }
 
   private async turnOffMicrophone(): Promise<void> {
     if (!this.page) return;
 
-    const micSelectors = [
+    // Selectors for microphone buttons that indicate mic is ON (need to turn off)
+    const micOnSelectors = [
       '[aria-label*="Turn off microphone" i]',
       '[aria-label*="Désactiver le micro" i]',  // French
+      '[aria-label*="microphone is on" i]',
       '[data-is-muted="false"][aria-label*="microphone" i]',
       '[data-is-muted="false"][aria-label*="mic" i]',
-      '[jsname="Dg9Wp"]',
     ];
 
-    for (const selector of micSelectors) {
+    // Try to find and click mic button that's currently ON
+    for (const selector of micOnSelectors) {
       try {
         const micBtn = await this.page.$(selector);
         if (micBtn) {
           await this.humanClick(selector);
           logger.info('Turned off microphone');
+          await this.sleep(300);
           return;
         }
       } catch {
         // Try next selector
       }
     }
+
+    // Fallback: try jsname selectors (pre-join screen)
+    const fallbackSelectors = ['[jsname="Dg9Wp"]', '[jsname="KxPJBe"]'];
+    for (const selector of fallbackSelectors) {
+      try {
+        const btn = await this.page.$(selector);
+        if (btn) {
+          // Check if it's not already muted
+          const ariaLabel = await btn.getAttribute('aria-label');
+          if (ariaLabel && !ariaLabel.toLowerCase().includes('turn on')) {
+            await this.humanClick(selector);
+            logger.info('Turned off microphone (fallback)');
+            await this.sleep(300);
+            return;
+          }
+        }
+      } catch {
+        // Continue
+      }
+    }
+
+    logger.info('Microphone appears to be already off or not available');
   }
 
   private async waitForAdmission(): Promise<void> {
@@ -221,6 +295,55 @@ export class GoogleMeetBot extends BaseMeetingBot {
     }
 
     throw new Error('Timed out waiting to be admitted');
+  }
+
+  /**
+   * Get the number of participants in the meeting
+   */
+  private async getParticipantCount(): Promise<number> {
+    if (!this.page) return 0;
+
+    try {
+      // Try to find participant count from the UI
+      // Google Meet shows participant count in various places
+
+      // Method 1: Check the participant panel button text
+      const participantBtnSelectors = [
+        '[aria-label*="participant" i]',
+        '[aria-label*="people" i]',
+        '[data-participant-count]',
+      ];
+
+      for (const selector of participantBtnSelectors) {
+        const btn = await this.page.$(selector);
+        if (btn) {
+          const text = await btn.textContent();
+          const match = text?.match(/(\d+)/);
+          if (match) {
+            return parseInt(match[1], 10);
+          }
+
+          // Try aria-label
+          const label = await btn.getAttribute('aria-label');
+          const labelMatch = label?.match(/(\d+)/);
+          if (labelMatch) {
+            return parseInt(labelMatch[1], 10);
+          }
+        }
+      }
+
+      // Method 2: Count visible participant tiles
+      const participantTiles = await this.page.$$('[data-participant-id], [data-requested-participant-id], [data-allocation-index]');
+      if (participantTiles.length > 0) {
+        return participantTiles.length;
+      }
+
+      // Method 3: If in meeting but can't count, assume at least 1 (self)
+      return 1;
+    } catch (error) {
+      logger.warn(`Failed to get participant count: ${error}`);
+      return 1;
+    }
   }
 
   async checkMeetingEnded(): Promise<boolean> {
@@ -257,6 +380,15 @@ export class GoogleMeetBot extends BaseMeetingBot {
     if (!url.includes('meet.google.com/') || url.includes('meet.google.com/?')) {
       // Redirected away from meeting
       logger.info(`Meeting ended: URL changed to ${url}`);
+      return true;
+    }
+
+    // Check if the bot is the only participant left
+    const participantCount = await this.getParticipantCount();
+    if (participantCount <= 1) {
+      logger.info(`Meeting ended: Bot is the only participant (count: ${participantCount})`);
+      // Leave the meeting gracefully
+      await this.leave();
       return true;
     }
 
