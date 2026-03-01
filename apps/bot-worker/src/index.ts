@@ -1,4 +1,9 @@
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load .env from monorepo root
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
