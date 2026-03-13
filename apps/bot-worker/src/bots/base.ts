@@ -5,6 +5,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../lib/logger';
 import { BOT_CONFIG } from '@aramis/shared';
+import {
+  RecordingOrchestrator,
+  RecordingOrchestratorConfig,
+  RecordingInfo,
+} from '../lib/recording-orchestrator';
 
 // Add stealth plugin to avoid bot detection
 // Disable specific evasions that can cause issues
@@ -40,6 +45,8 @@ export abstract class BaseMeetingBot {
   protected recordingPath: string | null = null;
   protected startTime: Date | null = null;
   protected screenshotCounter = 0;
+  protected recordingOrchestrator: RecordingOrchestrator | null = null;
+  protected lastRecordingInfo: RecordingInfo | null = null;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
     this.config = config;
@@ -85,7 +92,7 @@ export abstract class BaseMeetingBot {
       fs.mkdirSync(recordingsDir, { recursive: true });
     }
 
-    // Use incognito context with video recording enabled
+    // Use incognito context (video recording is now handled by FFmpeg/RecordingOrchestrator)
     this.context = await this.browser.newContext({
       permissions: ['microphone', 'camera'],
       viewport: { width: 1920, height: 1080 },
@@ -94,11 +101,6 @@ export abstract class BaseMeetingBot {
       locale: 'en-US',
       timezoneId: 'America/New_York',
       colorScheme: 'light',
-      // Enable video recording
-      recordVideo: {
-        dir: recordingsDir,
-        size: { width: 1920, height: 1080 },
-      },
     });
 
     this.page = await this.context.newPage();
@@ -189,6 +191,45 @@ export abstract class BaseMeetingBot {
         return getParameter.call(this, parameter);
       };
     });
+
+    // Initialize the recording orchestrator (uses FFmpeg for video/audio capture)
+    this.recordingOrchestrator = new RecordingOrchestrator({
+      meetingId: this.config.meetingId,
+      display: process.env.DISPLAY || ':99',
+      audioSource: process.env.PULSE_SOURCE || 'default',
+      tempDir: recordingsDir,
+      resolution: { width: 1920, height: 1080 },
+      frameRate: 30,
+      enableLiveUpload: true,
+    });
+
+    // Set up recording event handlers
+    this.setupRecordingEventHandlers();
+  }
+
+  /**
+   * Set up event handlers for the recording orchestrator
+   */
+  private setupRecordingEventHandlers(): void {
+    if (!this.recordingOrchestrator) return;
+
+    this.recordingOrchestrator.on('chunk-uploaded', (event) => {
+      logger.info(`Chunk uploaded: ${event.s3Url} (${event.size} bytes, type: ${event.type})`);
+    });
+
+    this.recordingOrchestrator.on('recording-complete', (event) => {
+      logger.info(`Recording complete: ${event.duration}s`);
+      if (event.videoUrl) logger.info(`  Video: ${event.videoUrl}`);
+      if (event.audioUrl) logger.info(`  Audio: ${event.audioUrl}`);
+      if (event.mergedUrl) logger.info(`  Merged: ${event.mergedUrl}`);
+    });
+
+    this.recordingOrchestrator.on('error', (event) => {
+      logger.error(`Recording error in ${event.phase}: ${event.error.message}`);
+      if (!event.recoverable) {
+        logger.error('Non-recoverable recording error - recording may be incomplete');
+      }
+    });
   }
 
   /**
@@ -197,59 +238,49 @@ export abstract class BaseMeetingBot {
   abstract join(): Promise<void>;
 
   /**
-   * Start recording the meeting
-   * Note: Video recording is automatically started by Playwright's recordVideo option
+   * Start recording the meeting using FFmpeg via RecordingOrchestrator
    */
   async startRecording(options: RecordingOptions = {}): Promise<void> {
-    if (!this.page) {
-      throw new Error('Page not initialized');
+    if (!this.recordingOrchestrator) {
+      throw new Error('Recording orchestrator not initialized');
     }
 
-    // With Playwright's recordVideo, recording starts automatically
-    // We just need to track the state
+    logger.info(`Starting recording for meeting: ${this.config.meetingId}`);
+
+    await this.recordingOrchestrator.start();
+
     this.isRecording = true;
     this.startTime = new Date();
-
-    // The actual video path will be determined when we stop recording
-    const video = this.page.video();
-    if (video) {
-      this.recordingPath = await video.path();
-      logger.info(`Starting recording: ${this.recordingPath}`);
-    } else {
-      logger.warn('Video recording not available - recordVideo may not be configured');
-    }
 
     logger.info('Recording started');
   }
 
   /**
    * Stop recording and save the file
-   * Playwright saves the video when the page/context is closed
    */
   async stopRecording(): Promise<string | null> {
-    if (!this.isRecording || !this.page) {
+    if (!this.isRecording || !this.recordingOrchestrator) {
       return null;
     }
 
     logger.info('Stopping recording...');
 
-    // Get the video object before closing the page
-    const video = this.page.video();
-
-    if (video) {
-      // Close the page to finalize the video file
-      await this.page.close();
-      this.page = null;
-
-      // Get the saved video path
-      this.recordingPath = await video.path();
-      logger.info(`Recording saved: ${this.recordingPath}`);
-    } else {
-      logger.warn('No video recording available');
-      this.recordingPath = null;
-    }
+    // Stop the orchestrator with merge and upload
+    this.lastRecordingInfo = await this.recordingOrchestrator.stop({
+      merge: true,
+      upload: true,
+      cleanup: true,
+    });
 
     this.isRecording = false;
+
+    // Return the best available URL (S3 merged > S3 video > local path)
+    this.recordingPath = this.lastRecordingInfo.s3MergedUrl
+      ?? this.lastRecordingInfo.s3VideoUrl
+      ?? this.lastRecordingInfo.mergedPath
+      ?? this.lastRecordingInfo.videoPath;
+
+    logger.info(`Recording saved: ${this.recordingPath}`);
 
     return this.recordingPath;
   }
@@ -296,7 +327,8 @@ export abstract class BaseMeetingBot {
   abstract checkStillInMeeting(): Promise<boolean>;
 
   /**
-   * Save the recording and return the path
+   * Save the recording and return the path/URL
+   * The orchestrator handles S3 upload, so this returns the S3 URL if available
    */
   async saveRecording(): Promise<string> {
     await this.stopRecording();
@@ -305,25 +337,14 @@ export abstract class BaseMeetingBot {
       throw new Error('No recording available');
     }
 
-    // Verify the file exists
-    if (!fs.existsSync(this.recordingPath)) {
-      throw new Error(`Recording file not found: ${this.recordingPath}`);
-    }
-
-    // Rename to a meaningful filename with meetingId
-    const dir = path.dirname(this.recordingPath);
-    const newPath = path.join(dir, `${this.config.meetingId}_${Date.now()}.webm`);
-
-    try {
-      fs.renameSync(this.recordingPath, newPath);
-      this.recordingPath = newPath;
-      logger.info(`Recording renamed to: ${newPath}`);
-    } catch (renameError) {
-      logger.warn(`Could not rename recording: ${renameError}`);
-      // Continue with original path
-    }
-
     return this.recordingPath;
+  }
+
+  /**
+   * Get the full recording info (includes separate audio URL for transcription)
+   */
+  getRecordingInfo(): RecordingInfo | null {
+    return this.lastRecordingInfo;
   }
 
   /**
@@ -336,6 +357,15 @@ export abstract class BaseMeetingBot {
    */
   async cleanup(): Promise<void> {
     logger.info('Cleaning up bot resources');
+
+    // Force cleanup recording orchestrator if still running
+    if (this.recordingOrchestrator?.isRecording()) {
+      try {
+        await this.recordingOrchestrator.forceCleanup();
+      } catch (error) {
+        logger.warn(`Error during recording cleanup: ${error}`);
+      }
+    }
 
     if (this.isRecording) {
       await this.stopRecording();
