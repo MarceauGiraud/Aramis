@@ -10,7 +10,6 @@ import { prisma } from '@aramis/database';
 import { QUEUE_NAMES, JOB_TYPES } from '@aramis/shared';
 import { MeetingBotFactory } from './bots/factory';
 import { logger } from './lib/logger';
-import { uploadRecording } from './lib/storage';
 import { isS3Configured } from './lib/s3-config';
 
 const redis = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
@@ -101,23 +100,16 @@ const meetingWorker = new Worker(
       // Wait for meeting to end or bot to be stopped
       await bot.waitForEnd();
 
-      // Process recording
+      // Process recording (orchestrator handles S3 upload internally)
       const recordingPath = await bot.saveRecording();
-      let videoUrl = recordingPath;
-      let s3Uploaded = false;
+      const recordingInfo = bot.getRecordingInfo();
 
-      // Upload to S3 if configured
-      if (isS3Configured()) {
-        try {
-          logger.info(`Uploading recording to S3...`);
-          videoUrl = await uploadRecording(recordingPath, meetingId);
-          s3Uploaded = true;
-          logger.info(`Recording uploaded to S3: ${videoUrl}`);
-        } catch (uploadError) {
-          logger.error(`Failed to upload to S3: ${uploadError}`);
-          // Continue with local path if S3 fails
-        }
-      }
+      // Determine the best video URL (S3 merged > S3 video > local path)
+      const videoUrl = recordingInfo?.s3MergedUrl
+        ?? recordingInfo?.s3VideoUrl
+        ?? recordingPath;
+
+      const s3Uploaded = !!(recordingInfo?.s3MergedUrl || recordingInfo?.s3VideoUrl);
 
       // Update meeting with recording info
       await prisma.meeting.update({
@@ -128,24 +120,29 @@ const meetingWorker = new Worker(
         },
       });
 
-      // Create recording record
+      // Create recording record with both video and audio URLs
       const recording = await prisma.recording.create({
         data: {
           meetingId,
           videoUrl,
+          audioUrl: recordingInfo?.s3AudioUrl ?? undefined,
           status: s3Uploaded ? 'COMPLETED' : 'PROCESSING',
         },
       });
 
       logger.info(`Meeting ${meetingId} recording saved: ${videoUrl}`);
+      if (recordingInfo?.s3AudioUrl) {
+        logger.info(`Audio available at: ${recordingInfo.s3AudioUrl}`);
+      }
 
-      // Queue transcription job if S3 upload succeeded
+      // Queue transcription job using the audio URL (better for transcription)
+      const audioUrl = recordingInfo?.s3AudioUrl ?? videoUrl;
       if (s3Uploaded && process.env.DEEPGRAM_API_KEY) {
         try {
           await transcriptionQueue.add('transcribe', {
             meetingId,
             recordingId: recording.id,
-            audioUrl: videoUrl,
+            audioUrl, // Use dedicated audio URL for better transcription
           }, {
             attempts: 3,
             backoff: { type: 'exponential', delay: 10000 },
