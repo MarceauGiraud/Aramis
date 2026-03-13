@@ -79,7 +79,13 @@ export abstract class BaseMeetingBot {
       ],
     });
 
-    // Use incognito context with both permissions to avoid popups
+    // Ensure recordings directory exists
+    const recordingsDir = '/tmp/recordings';
+    if (!fs.existsSync(recordingsDir)) {
+      fs.mkdirSync(recordingsDir, { recursive: true });
+    }
+
+    // Use incognito context with video recording enabled
     this.context = await this.browser.newContext({
       permissions: ['microphone', 'camera'],
       viewport: { width: 1920, height: 1080 },
@@ -88,6 +94,11 @@ export abstract class BaseMeetingBot {
       locale: 'en-US',
       timezoneId: 'America/New_York',
       colorScheme: 'light',
+      // Enable video recording
+      recordVideo: {
+        dir: recordingsDir,
+        size: { width: 1920, height: 1080 },
+      },
     });
 
     this.page = await this.context.newPage();
@@ -187,44 +198,33 @@ export abstract class BaseMeetingBot {
 
   /**
    * Start recording the meeting
+   * Note: Video recording is automatically started by Playwright's recordVideo option
    */
   async startRecording(options: RecordingOptions = {}): Promise<void> {
     if (!this.page) {
       throw new Error('Page not initialized');
     }
 
-    const outputDir = options.outputDir || '/tmp/recordings';
-    const format = options.format || 'webm';
-
-    // Ensure output directory exists
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    this.recordingPath = path.join(
-      outputDir,
-      `${this.config.meetingId}_${Date.now()}.${format}`
-    );
-
-    logger.info(`Starting recording: ${this.recordingPath}`);
-
-    // Use CDP to capture the page
-    const client = await this.page.context().newCDPSession(this.page);
-
-    await client.send('Page.startScreencast', {
-      format: 'jpeg',
-      quality: 80,
-      everyNthFrame: 1,
-    });
-
+    // With Playwright's recordVideo, recording starts automatically
+    // We just need to track the state
     this.isRecording = true;
     this.startTime = new Date();
+
+    // The actual video path will be determined when we stop recording
+    const video = this.page.video();
+    if (video) {
+      this.recordingPath = await video.path();
+      logger.info(`Starting recording: ${this.recordingPath}`);
+    } else {
+      logger.warn('Video recording not available - recordVideo may not be configured');
+    }
 
     logger.info('Recording started');
   }
 
   /**
    * Stop recording and save the file
+   * Playwright saves the video when the page/context is closed
    */
   async stopRecording(): Promise<string | null> {
     if (!this.isRecording || !this.page) {
@@ -233,12 +233,23 @@ export abstract class BaseMeetingBot {
 
     logger.info('Stopping recording...');
 
-    const client = await this.page.context().newCDPSession(this.page);
-    await client.send('Page.stopScreencast');
+    // Get the video object before closing the page
+    const video = this.page.video();
+
+    if (video) {
+      // Close the page to finalize the video file
+      await this.page.close();
+      this.page = null;
+
+      // Get the saved video path
+      this.recordingPath = await video.path();
+      logger.info(`Recording saved: ${this.recordingPath}`);
+    } else {
+      logger.warn('No video recording available');
+      this.recordingPath = null;
+    }
 
     this.isRecording = false;
-
-    logger.info(`Recording saved: ${this.recordingPath}`);
 
     return this.recordingPath;
   }
@@ -294,7 +305,24 @@ export abstract class BaseMeetingBot {
       throw new Error('No recording available');
     }
 
-    // In a real implementation, upload to S3 here
+    // Verify the file exists
+    if (!fs.existsSync(this.recordingPath)) {
+      throw new Error(`Recording file not found: ${this.recordingPath}`);
+    }
+
+    // Rename to a meaningful filename with meetingId
+    const dir = path.dirname(this.recordingPath);
+    const newPath = path.join(dir, `${this.config.meetingId}_${Date.now()}.webm`);
+
+    try {
+      fs.renameSync(this.recordingPath, newPath);
+      this.recordingPath = newPath;
+      logger.info(`Recording renamed to: ${newPath}`);
+    } catch (renameError) {
+      logger.warn(`Could not rename recording: ${renameError}`);
+      // Continue with original path
+    }
+
     return this.recordingPath;
   }
 
@@ -313,8 +341,14 @@ export abstract class BaseMeetingBot {
       await this.stopRecording();
     }
 
+    // Page may already be closed by stopRecording
     if (this.page) {
-      await this.page.close().catch(() => {});
+      try {
+        await this.page.close();
+      } catch {
+        // Page already closed
+      }
+      this.page = null;
     }
 
     if (this.context) {
