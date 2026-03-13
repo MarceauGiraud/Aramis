@@ -105,28 +105,49 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private async handlePopups(): Promise<void> {
     if (!this.page) return;
 
-    // Common popup/dialog dismiss buttons
+    // Common popup/dialog dismiss buttons - ordered by priority
     const popupSelectors = [
       'text=Got it',
       'text=OK',
       'text=Compris',           // French "Got it"
-      'text=Allow',
-      'text=Autoriser',         // French "Allow"
       '[aria-label="Dismiss"]',
       '[aria-label="Close"]',
       '[aria-label="Fermer"]',  // French "Close"
       'button:has-text("Dismiss")',
       'button:has-text("Close")',
-      // Camera/Mic permission dialogs
+    ];
+
+    // Permission dialogs that may appear after initial popups
+    const permissionSelectors = [
+      'text=Allow',
+      'text=Autoriser',         // French "Allow"
       'button:has-text("Allow")',
       'button:has-text("Block")',  // Click block to deny camera if needed
     ];
 
+    // First pass: dismiss immediate popups (short timeout)
     for (const selector of popupSelectors) {
       try {
         const popup = await this.page.$(selector);
         if (popup) {
-          await this.humanClick(selector);
+          await this.page.click(selector, { timeout: 2000 });
+          logger.info(`Dismissed popup: ${selector}`);
+          await this.sleep(300 + Math.random() * 200);
+        }
+      } catch {
+        // Continue to next selector
+      }
+    }
+
+    // Wait for permission dialogs to appear (camera/mic may load after initial popups)
+    await this.sleep(1000);
+
+    // Second pass: handle permission dialogs (slightly longer timeout)
+    for (const selector of permissionSelectors) {
+      try {
+        const popup = await this.page.$(selector);
+        if (popup) {
+          await this.page.click(selector, { timeout: 5000 });
           logger.info(`Dismissed popup: ${selector}`);
           await this.sleep(300 + Math.random() * 200);
         }
