@@ -4,19 +4,31 @@ import * as path from 'path';
 // Load .env from monorepo root
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
-import { Worker } from 'bullmq';
+import { Worker, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { QUEUE_NAMES, JOB_TYPES } from '@aramis/shared';
 import { MeetingBotFactory } from './bots/factory';
 import { logger } from './lib/logger';
+import { uploadRecording } from './lib/storage';
+import { isS3Configured } from './lib/s3-config';
 
 const redis = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
 });
 
+// Transcription queue for queueing jobs after recording
+const transcriptionQueue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: redis });
+
 // Worker ID for tracking
 const workerId = `worker-${process.pid}-${Date.now()}`;
+
+// Log S3 configuration status at startup
+if (isS3Configured()) {
+  logger.info('S3 storage configured - recordings will be uploaded');
+} else {
+  logger.warn('S3 not configured - recordings will only be saved locally');
+}
 
 logger.info(`Starting bot worker: ${workerId}`);
 
@@ -91,6 +103,21 @@ const meetingWorker = new Worker(
 
       // Process recording
       const recordingPath = await bot.saveRecording();
+      let videoUrl = recordingPath;
+      let s3Uploaded = false;
+
+      // Upload to S3 if configured
+      if (isS3Configured()) {
+        try {
+          logger.info(`Uploading recording to S3...`);
+          videoUrl = await uploadRecording(recordingPath, meetingId);
+          s3Uploaded = true;
+          logger.info(`Recording uploaded to S3: ${videoUrl}`);
+        } catch (uploadError) {
+          logger.error(`Failed to upload to S3: ${uploadError}`);
+          // Continue with local path if S3 fails
+        }
+      }
 
       // Update meeting with recording info
       await prisma.meeting.update({
@@ -102,17 +129,34 @@ const meetingWorker = new Worker(
       });
 
       // Create recording record
-      await prisma.recording.create({
+      const recording = await prisma.recording.create({
         data: {
           meetingId,
-          videoUrl: recordingPath,
-          status: 'PROCESSING',
+          videoUrl,
+          status: s3Uploaded ? 'COMPLETED' : 'PROCESSING',
         },
       });
 
-      logger.info(`Meeting ${meetingId} recording saved: ${recordingPath}`);
+      logger.info(`Meeting ${meetingId} recording saved: ${videoUrl}`);
 
-      return { success: true, recordingPath };
+      // Queue transcription job if S3 upload succeeded
+      if (s3Uploaded && process.env.DEEPGRAM_API_KEY) {
+        try {
+          await transcriptionQueue.add('transcribe', {
+            meetingId,
+            recordingId: recording.id,
+            audioUrl: videoUrl,
+          }, {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+          });
+          logger.info(`Queued transcription job for meeting ${meetingId}`);
+        } catch (queueError) {
+          logger.error(`Failed to queue transcription: ${queueError}`);
+        }
+      }
+
+      return { success: true, recordingPath: videoUrl, s3Uploaded };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       logger.error(`Error in meeting bot for ${meetingId}: ${errorMessage}`);
@@ -167,6 +211,7 @@ meetingWorker.on('failed', (job, err) => {
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM, shutting down...');
   await meetingWorker.close();
+  await transcriptionQueue.close();
   await redis.quit();
   process.exit(0);
 });
@@ -174,6 +219,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   logger.info('Received SIGINT, shutting down...');
   await meetingWorker.close();
+  await transcriptionQueue.close();
   await redis.quit();
   process.exit(0);
 });
