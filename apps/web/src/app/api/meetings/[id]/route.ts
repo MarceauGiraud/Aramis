@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@aramis/database';
-import { resolveS3Url } from '@/lib/s3';
+import { BOT_COMMANDS_CHANNEL } from '@aramis/shared';
+import type { BotCommand } from '@aramis/shared';
 
 // TODO: Replace with actual auth when implemented
 async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
@@ -39,14 +40,9 @@ export async function GET(
           include: {
             segments: {
               orderBy: { startTime: 'asc' },
-              include: {
-                speaker: true,
-              },
             },
-            speakers: true,
           },
         },
-        summary: true,
         botSession: {
           include: {
             logs: {
@@ -66,45 +62,7 @@ export async function GET(
       );
     }
 
-    // Convert s3:// URLs to presigned HTTP URLs for browser playback
-    const result: any = { ...meeting };
-
-    // Compute speaking time statistics from TranscriptSpeaker data
-    if (meeting.transcript?.speakers && meeting.transcript.speakers.length > 0) {
-      const totalSpeakingTime = meeting.transcript.speakers.reduce(
-        (sum, s) => sum + (s.totalDuration || 0),
-        0
-      );
-      result.speakingStats = meeting.transcript.speakers.map((s) => ({
-        name: s.identifiedName || s.label,
-        duration: s.totalDuration || 0,
-        percentage:
-          totalSpeakingTime > 0
-            ? Math.round(((s.totalDuration || 0) / totalSpeakingTime) * 100)
-            : 0,
-        segmentCount: s.segmentCount,
-      }));
-    }
-
-    if (meeting.recording) {
-      result.recording = { ...meeting.recording };
-      if (meeting.recording.videoUrl) {
-        try {
-          result.recording.videoUrl = await resolveS3Url(meeting.recording.videoUrl);
-        } catch (e) {
-          console.error('Failed to resolve video URL:', e);
-        }
-      }
-      if (meeting.recording.audioUrl) {
-        try {
-          result.recording.audioUrl = await resolveS3Url(meeting.recording.audioUrl);
-        } catch (e) {
-          console.error('Failed to resolve audio URL:', e);
-        }
-      }
-    }
-
-    return NextResponse.json(result);
+    return NextResponse.json(meeting);
   } catch (error) {
     console.error('Error fetching meeting:', error);
     return NextResponse.json(
@@ -195,7 +153,7 @@ export async function PATCH(
       );
     }
 
-    const { status, title, recordingEnabled } = body;
+    const { status, title, recordingEnabled, action } = body;
 
     // Validate title if provided
     if (title !== undefined && (typeof title !== 'string' || title.length > 255)) {
@@ -215,6 +173,44 @@ export async function PATCH(
         { error: 'Meeting not found' },
         { status: 404 }
       );
+    }
+
+    // Handle pause/resume actions via Redis pub/sub
+    if (action === 'pause' || action === 'resume') {
+      // Meeting must be in RECORDING status
+      if (meeting.status !== 'RECORDING') {
+        return NextResponse.json(
+          { error: `Cannot ${action}: meeting is not currently recording (status: ${meeting.status})` },
+          { status: 400 }
+        );
+      }
+
+      try {
+        // Publish command to Redis pub/sub channel
+        const IORedis = (await import('ioredis')).default;
+        const redisClient = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379');
+
+        const command: BotCommand = {
+          type: action,
+          meetingId: params.id,
+        };
+
+        const channel = `${BOT_COMMANDS_CHANNEL}:${params.id}`;
+        await redisClient.publish(channel, JSON.stringify(command));
+        await redisClient.quit();
+
+        return NextResponse.json({
+          success: true,
+          action,
+          meetingId: params.id,
+        });
+      } catch (pubsubError) {
+        console.error('Failed to publish command:', pubsubError);
+        return NextResponse.json(
+          { error: `Failed to ${action} recording` },
+          { status: 500 }
+        );
+      }
     }
 
     // Handle recording toggle

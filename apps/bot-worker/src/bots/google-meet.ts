@@ -175,7 +175,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private lastKnownParticipantCount = 0;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
-    super(config, options);
+    super({ ...config, platform: config.platform ?? 'GOOGLE_MEET' }, options);
   }
 
   // ========================================================================
@@ -300,10 +300,17 @@ export class GoogleMeetBot extends BaseMeetingBot {
     const joinClicked = await this.clickJoinButton();
     if (!joinClicked) {
       await this.takeDebugScreenshot('05_no_join_button');
+      await this.captureScreenshot('join_no_button');
       // Re-detect state to provide a meaningful error
       const state = await this.detectPageState();
-      if (state === 'ACCESS_DENIED') throw new JoinError('Access denied', false);
-      if (state === 'LOGIN_REQUIRED') throw new JoinError('Sign-in required', false);
+      if (state === 'ACCESS_DENIED') {
+        await this.captureScreenshot('join_access_denied');
+        throw new JoinError('Access denied', false);
+      }
+      if (state === 'LOGIN_REQUIRED') {
+        await this.captureScreenshot('join_sign_in_required');
+        throw new JoinError('Sign-in required', false);
+      }
       throw new JoinError('Could not find join button', true);
     }
 
@@ -324,6 +331,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
       const inMeeting = await this.checkStillInMeeting();
       if (!inMeeting) {
         await this.takeDebugScreenshot('07_join_failed');
+        await this.captureScreenshot('join_verification_failed');
         throw new JoinError(`Failed to join — final state: ${finalState}`, true);
       }
     }

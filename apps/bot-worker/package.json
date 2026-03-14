@@ -10,25 +10,25 @@
     "setup": "playwright install chromium"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
     "@aramis/database": "workspace:*",
     "@aramis/shared": "workspace:*",
+    "@deepgram/sdk": "^3.9.0",
     "@aws-sdk/client-s3": "^3.490.0",
     "@aws-sdk/lib-storage": "^3.490.0",
     "@aws-sdk/s3-request-presigner": "^3.490.0",
-    "@deepgram/sdk": "^3.0.0",
     "bullmq": "^5.1.0",
     "dotenv": "^16.3.1",
     "ioredis": "^5.3.2",
-    "openai": "^6.27.0",
     "playwright": "^1.52.0",
+    "openai": "^4.73.0",
     "playwright-extra": "^4.3.6",
-    "playwright-extra-plugin-stealth": "^0.0.1",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "winston": "^3.19.0"
+    "playwright-extra-plugin-stealth": "^0.0.1",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
     "eslint": "^8.56.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"

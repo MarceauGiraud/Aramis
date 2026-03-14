@@ -9,6 +9,12 @@
  * - Chunks are uploaded to S3 as they are recorded (live upload)
  * - At the end, transcription is triggered
  *
+ * Features:
+ * - Pause/Resume recording via SIGSTOP/SIGCONT
+ * - Multiple formats: WebM (VP9), MP4 (H.264), MP3 (audio-only)
+ * - Configurable resolution
+ * - Live audio stream for transcription/WebSocket via tee muxer
+ *
  * Events:
  * - 'chunk-uploaded': Emitted when a chunk is uploaded to S3
  * - 'recording-complete': Emitted when recording stops and final upload completes
@@ -16,13 +22,16 @@
  */
 
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Readable, PassThrough } from 'stream';
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { logger } from './logger';
 import { isS3Configured } from './s3-config';
+import { FORMAT_CONFIG, RESOLUTION_MAP } from '@aramis/shared';
+import type { RecordingFormat, Resolution } from '@aramis/shared';
 
 // ============================================================================
 // Types and Interfaces
@@ -49,6 +58,16 @@ export interface RecordingOrchestratorConfig {
   s3Bucket?: string;
   /** S3 key prefix */
   s3KeyPrefix?: string;
+  /** Recording format: webm, mp4, or mp3 */
+  format?: RecordingFormat;
+  /** Resolution preset key */
+  resolutionPreset?: Resolution;
+}
+
+export interface PauseEvent {
+  pausedAt: Date;
+  resumedAt: Date | null;
+  durationMs: number;
 }
 
 export interface RecordingInfo {
@@ -65,12 +84,16 @@ export interface RecordingInfo {
   s3MergedUrl: string | null;
   chunksUploaded: number;
   errors: string[];
+  format: RecordingFormat;
+  pauseEvents: PauseEvent[];
+  totalPauseDuration: number;
 }
 
 export type RecordingStatus =
   | 'idle'
   | 'starting'
   | 'recording'
+  | 'paused'
   | 'stopping'
   | 'merging'
   | 'uploading'
@@ -91,6 +114,7 @@ export interface RecordingCompleteEvent {
   videoUrl: string | null;
   audioUrl: string | null;
   mergedUrl: string | null;
+  format: RecordingFormat;
 }
 
 export interface RecordingErrorEvent {
@@ -133,21 +157,42 @@ export class RecordingOrchestrator extends EventEmitter {
   // S3 client
   private s3Client: S3Client | null = null;
 
+  // Pause tracking
+  private pauseEvents: PauseEvent[] = [];
+  private totalPauseDurationMs = 0;
+  private currentPauseStart: Date | null = null;
+
+  // Format config
+  private formatConfig: typeof FORMAT_CONFIG[RecordingFormat];
+
+  // Audio stream fork for live consumers (transcription, WebSocket)
+  private audioStreamPassthrough: PassThrough | null = null;
+
   constructor(config: RecordingOrchestratorConfig) {
     super();
+
+    const format = config.format ?? 'webm';
+    this.formatConfig = FORMAT_CONFIG[format];
+
+    // If resolutionPreset is provided, use it; otherwise fall back to explicit resolution
+    const resolvedResolution = config.resolutionPreset
+      ? RESOLUTION_MAP[config.resolutionPreset]
+      : (config.resolution ?? { width: 1920, height: 1080 });
 
     // Apply defaults
     this.config = {
       meetingId: config.meetingId,
       display: config.display ?? process.env.DISPLAY ?? ':99',
-      audioSource: config.audioSource ?? process.env.PULSE_SOURCE ?? 'default',
+      audioSource: config.audioSource ?? 'default',
       tempDir: config.tempDir ?? '/tmp/recordings',
       chunkDurationSec: config.chunkDurationSec ?? 30,
-      resolution: config.resolution ?? { width: 1920, height: 1080 },
+      resolution: resolvedResolution,
       frameRate: config.frameRate ?? 30,
       enableLiveUpload: config.enableLiveUpload ?? true,
       s3Bucket: config.s3Bucket ?? process.env.S3_BUCKET ?? 'recordings',
       s3KeyPrefix: config.s3KeyPrefix ?? 'recordings',
+      format,
+      resolutionPreset: config.resolutionPreset ?? '1080p',
     };
 
     // Initialize S3 client if configured
@@ -179,30 +224,53 @@ export class RecordingOrchestrator extends EventEmitter {
     this.status = 'starting';
     this.startTime = new Date();
     this.errors = [];
+    this.pauseEvents = [];
+    this.totalPauseDurationMs = 0;
+    this.currentPauseStart = null;
 
-    logger.info(`Starting recording for meeting: ${this.config.meetingId}`);
+    logger.info(`Starting recording for meeting: ${this.config.meetingId} (format: ${this.config.format})`);
 
     // Ensure temp directory exists
     await this.ensureTempDir();
 
-    // Generate output paths
+    // Configure display resolution if on Linux
+    this.configureDisplay();
+
+    // Generate output paths based on format
     const timestamp = Date.now();
-    this.videoPath = path.join(
-      this.config.tempDir,
-      `${this.config.meetingId}_${timestamp}_video.webm`
-    );
-    this.audioPath = path.join(
-      this.config.tempDir,
-      `${this.config.meetingId}_${timestamp}_audio.wav`
-    );
-    this.mergedPath = path.join(
-      this.config.tempDir,
-      `${this.config.meetingId}_${timestamp}_merged.webm`
-    );
+    const ext = this.formatConfig.ext;
+
+    // For MP3 format, skip video entirely
+    if (this.config.format === 'mp3') {
+      this.videoPath = null;
+      this.audioPath = path.join(
+        this.config.tempDir,
+        `${this.config.meetingId}_${timestamp}_audio.${ext}`
+      );
+      this.mergedPath = null;
+    } else {
+      this.videoPath = path.join(
+        this.config.tempDir,
+        `${this.config.meetingId}_${timestamp}_video.${ext}`
+      );
+      this.audioPath = path.join(
+        this.config.tempDir,
+        `${this.config.meetingId}_${timestamp}_audio.wav`
+      );
+      this.mergedPath = path.join(
+        this.config.tempDir,
+        `${this.config.meetingId}_${timestamp}_merged.${ext}`
+      );
+    }
 
     try {
-      // Start video and audio capture in parallel
-      await Promise.all([this.startVideoCapture(), this.startAudioCapture()]);
+      if (this.config.format === 'mp3') {
+        // Audio-only recording
+        await this.startAudioCapture();
+      } else {
+        // Start video and audio capture in parallel
+        await Promise.all([this.startVideoCapture(), this.startAudioCapture()]);
+      }
 
       this.status = 'recording';
       logger.info(`Recording started for meeting: ${this.config.meetingId}`);
@@ -213,6 +281,75 @@ export class RecordingOrchestrator extends EventEmitter {
       this.emitError(err, 'video-capture', false);
       throw error;
     }
+  }
+
+  /**
+   * Pause recording by sending SIGSTOP to FFmpeg processes
+   */
+  pause(): void {
+    if (this.status !== 'recording') {
+      throw new Error(`Cannot pause recording: current status is '${this.status}'`);
+    }
+
+    logger.info(`Pausing recording for meeting: ${this.config.meetingId}`);
+
+    // Send SIGSTOP to freeze FFmpeg processes
+    if (this.videoProcess && !this.videoProcess.killed) {
+      this.videoProcess.kill('SIGSTOP');
+    }
+    if (this.audioProcess && !this.audioProcess.killed) {
+      this.audioProcess.kill('SIGSTOP');
+    }
+
+    this.currentPauseStart = new Date();
+    this.status = 'paused';
+
+    logger.info('Recording paused');
+  }
+
+  /**
+   * Resume recording by sending SIGCONT to FFmpeg processes
+   */
+  resume(): void {
+    if (this.status !== 'paused') {
+      throw new Error(`Cannot resume recording: current status is '${this.status}'`);
+    }
+
+    logger.info(`Resuming recording for meeting: ${this.config.meetingId}`);
+
+    // Send SIGCONT to unfreeze FFmpeg processes
+    if (this.videoProcess && !this.videoProcess.killed) {
+      this.videoProcess.kill('SIGCONT');
+    }
+    if (this.audioProcess && !this.audioProcess.killed) {
+      this.audioProcess.kill('SIGCONT');
+    }
+
+    // Track pause duration
+    if (this.currentPauseStart) {
+      const now = new Date();
+      const pauseDuration = now.getTime() - this.currentPauseStart.getTime();
+      this.totalPauseDurationMs += pauseDuration;
+
+      this.pauseEvents.push({
+        pausedAt: this.currentPauseStart,
+        resumedAt: now,
+        durationMs: pauseDuration,
+      });
+
+      this.currentPauseStart = null;
+    }
+
+    this.status = 'recording';
+
+    logger.info(`Recording resumed. Total pause time: ${Math.floor(this.totalPauseDurationMs / 1000)}s`);
+  }
+
+  /**
+   * Check if recording is paused
+   */
+  isPaused(): boolean {
+    return this.status === 'paused';
   }
 
   /**
@@ -232,8 +369,14 @@ export class RecordingOrchestrator extends EventEmitter {
   ): Promise<RecordingInfo> {
     const { merge = true, upload = true, cleanup = true } = options;
 
-    if (this.status !== 'recording') {
+    if (this.status !== 'recording' && this.status !== 'paused') {
       throw new Error(`Cannot stop recording: current status is '${this.status}'`);
+    }
+
+    // Auto-resume if paused before stopping
+    if (this.status === 'paused') {
+      logger.info('Auto-resuming paused recording before stopping');
+      this.resume();
     }
 
     this.status = 'stopping';
@@ -243,10 +386,14 @@ export class RecordingOrchestrator extends EventEmitter {
 
     try {
       // Stop video and audio capture
-      await Promise.all([this.stopVideoCapture(), this.stopAudioCapture()]);
+      if (this.config.format === 'mp3') {
+        await this.stopAudioCapture();
+      } else {
+        await Promise.all([this.stopVideoCapture(), this.stopAudioCapture()]);
+      }
 
-      // Merge audio and video if requested
-      if (merge && this.videoPath && this.audioPath) {
+      // Merge audio and video if requested (not for mp3)
+      if (merge && this.config.format !== 'mp3' && this.videoPath && this.audioPath) {
         this.status = 'merging';
         await this.mergeAudioVideo();
       }
@@ -271,6 +418,7 @@ export class RecordingOrchestrator extends EventEmitter {
         videoUrl: this.s3VideoUrl,
         audioUrl: this.s3AudioUrl,
         mergedUrl: this.s3MergedUrl,
+        format: this.config.format,
       };
       this.emit('recording-complete', completeEvent);
 
@@ -303,6 +451,9 @@ export class RecordingOrchestrator extends EventEmitter {
       s3MergedUrl: this.s3MergedUrl,
       chunksUploaded: this.chunksUploaded,
       errors: [...this.errors],
+      format: this.config.format,
+      pauseEvents: [...this.pauseEvents],
+      totalPauseDuration: Math.floor(this.totalPauseDurationMs / 1000),
     };
   }
 
@@ -321,12 +472,35 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   /**
-   * Get recording duration in seconds
+   * Get recording duration in seconds, subtracting pause time
    */
   getDuration(): number {
     if (!this.startTime) return 0;
     const end = this.endTime ?? new Date();
-    return Math.floor((end.getTime() - this.startTime.getTime()) / 1000);
+    const totalMs = end.getTime() - this.startTime.getTime();
+
+    // Subtract completed pause durations
+    let pauseMs = this.totalPauseDurationMs;
+
+    // If currently paused, add current pause duration
+    if (this.currentPauseStart) {
+      pauseMs += new Date().getTime() - this.currentPauseStart.getTime();
+    }
+
+    return Math.max(0, Math.floor((totalMs - pauseMs) / 1000));
+  }
+
+  /**
+   * Get a Readable stream of raw PCM audio data for live consumers.
+   *
+   * This stream receives a copy of the audio data captured by FFmpeg,
+   * allowing live transcription and WebSocket streaming without affecting
+   * the recorded file.
+   *
+   * Returns null if recording has not started or audio capture is not active.
+   */
+  getAudioStream(): Readable | null {
+    return this.audioStreamPassthrough;
   }
 
   /**
@@ -335,12 +509,14 @@ export class RecordingOrchestrator extends EventEmitter {
   async forceCleanup(): Promise<void> {
     logger.warn(`Force cleanup initiated for meeting: ${this.config.meetingId}`);
 
-    // Kill any running processes
-    if (this.videoProcess) {
+    // Resume if paused before killing (SIGKILL on stopped process may not work)
+    if (this.videoProcess && !this.videoProcess.killed) {
+      try { this.videoProcess.kill('SIGCONT'); } catch { /* ignore */ }
       this.videoProcess.kill('SIGKILL');
       this.videoProcess = null;
     }
-    if (this.audioProcess) {
+    if (this.audioProcess && !this.audioProcess.killed) {
+      try { this.audioProcess.kill('SIGCONT'); } catch { /* ignore */ }
       this.audioProcess.kill('SIGKILL');
       this.audioProcess = null;
     }
@@ -352,11 +528,42 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   // ==========================================================================
+  // Display Configuration
+  // ==========================================================================
+
+  /**
+   * Configure Xvfb display resolution using xrandr (Linux only)
+   */
+  private configureDisplay(): void {
+    if (process.platform !== 'linux') return;
+
+    const { width, height } = this.config.resolution;
+    try {
+      execSync(
+        `xrandr --display ${this.config.display} -s ${width}x${height}`,
+        { timeout: 5000, stdio: 'pipe' }
+      );
+      logger.info(`Display ${this.config.display} configured to ${width}x${height}`);
+    } catch {
+      // xrandr may not be available or mode may not exist; not fatal
+      logger.debug(`Could not configure display resolution via xrandr (non-fatal)`);
+    }
+  }
+
+  // ==========================================================================
   // Video Capture
   // ==========================================================================
 
   private async startVideoCapture(): Promise<void> {
+    if (!this.videoPath) return;
+
     logger.info(`Starting video capture from display ${this.config.display}`);
+
+    const videoCodec = this.formatConfig.videoCodec;
+    if (!videoCodec) return; // audio-only format
+
+    // Build codec-specific args
+    const codecArgs = this.getVideoCodecArgs(videoCodec);
 
     const args = [
       // Input from X11 display
@@ -365,14 +572,10 @@ export class RecordingOrchestrator extends EventEmitter {
       '-framerate', String(this.config.frameRate),
       '-i', this.config.display,
       // Video encoding
-      '-c:v', 'libvpx-vp9',
-      '-b:v', '2M',
-      '-crf', '30',
-      '-deadline', 'realtime',
-      '-cpu-used', '8',
+      ...codecArgs,
       // Output
       '-y',
-      this.videoPath!,
+      this.videoPath,
     ];
 
     return new Promise((resolve, reject) => {
@@ -418,12 +621,37 @@ export class RecordingOrchestrator extends EventEmitter {
     });
   }
 
+  /**
+   * Get FFmpeg video codec arguments based on format
+   */
+  private getVideoCodecArgs(codec: string): string[] {
+    switch (codec) {
+      case 'libvpx-vp9':
+        return [
+          '-c:v', 'libvpx-vp9',
+          '-b:v', '2M',
+          '-crf', '30',
+          '-deadline', 'realtime',
+          '-cpu-used', '8',
+        ];
+      case 'libx264':
+        return [
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',
+          '-tune', 'zerolatency',
+          '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+        ];
+      default:
+        return ['-c:v', codec];
+    }
+  }
+
   private async stopVideoCapture(): Promise<void> {
-    if (!this.videoProcess) return;
+    const proc = this.videoProcess;
+    if (!proc) return;
 
     logger.info('Stopping video capture');
-
-    const proc = this.videoProcess;
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -454,20 +682,49 @@ export class RecordingOrchestrator extends EventEmitter {
   // ==========================================================================
 
   private async startAudioCapture(): Promise<void> {
-    logger.info(`Starting audio capture from source: '${this.config.audioSource}' (PULSE_SOURCE env: '${process.env.PULSE_SOURCE || 'not set'}')`);
+    if (!this.audioPath) return;
 
-    const args = [
-      // Input from PulseAudio
-      '-f', 'pulse',
-      '-i', this.config.audioSource,
-      // Audio encoding (WAV for transcription compatibility)
-      '-c:a', 'pcm_s16le',
-      '-ar', '16000', // 16kHz sample rate (good for speech recognition)
-      '-ac', '1', // Mono channel
-      // Output
-      '-y',
-      this.audioPath!,
-    ];
+    logger.info(`Starting audio capture from source ${this.config.audioSource}`);
+
+    // Create passthrough stream for live audio consumers
+    this.audioStreamPassthrough = new PassThrough();
+
+    let args: string[];
+
+    if (this.config.format === 'mp3') {
+      // MP3 audio-only output with tee muxer for live stream
+      // Tee outputs to both MP3 file and raw PCM on stdout for live consumers
+      const teeOutput = `[f=mp3]${this.audioPath}|[f=s16le]pipe:1`;
+      args = [
+        '-f', 'pulse',
+        '-i', this.config.audioSource,
+        '-c:a', 'libmp3lame',
+        '-b:a', this.formatConfig.mergeAudioBitrate,
+        '-ar', '44100',
+        '-ac', '2',
+        // Output via tee muxer to both file and stdout
+        '-f', 'tee',
+        '-y',
+        teeOutput,
+      ];
+    } else {
+      // WAV for transcription compatibility with tee muxer for live stream
+      // Use tee muxer to output to both file and stdout pipe for live consumers.
+      // FFmpeg tee format: -f tee "[f=wav]file.wav|[f=s16le]pipe:1"
+      // The pipe:1 output sends raw PCM to stdout for live transcription/WebSocket.
+      const teeOutput = `[f=wav]${this.audioPath}|[f=s16le]pipe:1`;
+      args = [
+        '-f', 'pulse',
+        '-i', this.config.audioSource,
+        '-c:a', 'pcm_s16le',
+        '-ar', '16000', // 16kHz sample rate (good for speech recognition)
+        '-ac', '1', // Mono channel
+        // Output via tee muxer to both file and stdout
+        '-f', 'tee',
+        '-y',
+        teeOutput,
+      ];
+    }
 
     return new Promise((resolve, reject) => {
       this.audioProcess = spawn('ffmpeg', args, {
@@ -475,6 +732,11 @@ export class RecordingOrchestrator extends EventEmitter {
       });
 
       let stderr = '';
+
+      // Pipe stdout (raw PCM from tee) to the passthrough stream
+      if (this.audioProcess.stdout) {
+        this.audioProcess.stdout.pipe(this.audioStreamPassthrough!);
+      }
 
       this.audioProcess.stderr?.on('data', (data) => {
         stderr += data.toString();
@@ -487,6 +749,11 @@ export class RecordingOrchestrator extends EventEmitter {
       });
 
       this.audioProcess.on('exit', (code, signal) => {
+        // End the passthrough stream when FFmpeg exits
+        if (this.audioStreamPassthrough) {
+          this.audioStreamPassthrough.end();
+        }
+
         if (code !== 0 && signal !== 'SIGTERM' && signal !== 'SIGINT') {
           const error = new Error(`Audio capture exited with code ${code}: ${stderr.slice(-500)}`);
           logger.error(error.message);
@@ -506,11 +773,10 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   private async stopAudioCapture(): Promise<void> {
-    if (!this.audioProcess) return;
+    const proc = this.audioProcess;
+    if (!proc) return;
 
     logger.info('Stopping audio capture');
-
-    const proc = this.audioProcess;
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -553,13 +819,16 @@ export class RecordingOrchestrator extends EventEmitter {
       logger.warn(`Audio file not found, skipping merge: ${this.audioPath}`);
       return;
     }
-    const audioSize = fs.statSync(this.audioPath).size;
-    if (audioSize <= 1024) {
-      logger.warn(`Audio file too small for merge (${audioSize} bytes), skipping`);
-      return;
-    }
 
     logger.info('Merging audio and video');
+
+    const mergeAudioCodec = this.formatConfig.mergeAudioCodec;
+    const mergeAudioBitrate = this.formatConfig.mergeAudioBitrate;
+
+    if (!mergeAudioCodec) {
+      logger.warn('No merge audio codec configured for this format, skipping merge');
+      return;
+    }
 
     const args = [
       // Input video
@@ -569,10 +838,10 @@ export class RecordingOrchestrator extends EventEmitter {
       // Map streams
       '-map', '0:v:0',
       '-map', '1:a:0',
-      // Copy video, encode audio to opus for WebM
+      // Copy video, encode audio per format
       '-c:v', 'copy',
-      '-c:a', 'libopus',
-      '-b:a', '64k',
+      '-c:a', mergeAudioCodec,
+      '-b:a', mergeAudioBitrate,
       // Sync audio
       '-shortest',
       // Output
@@ -623,24 +892,25 @@ export class RecordingOrchestrator extends EventEmitter {
 
     const uploadPromises: Promise<void>[] = [];
 
-    // Upload merged file if available, otherwise upload video and audio separately
-    if (this.mergedPath && fs.existsSync(this.mergedPath)) {
-      uploadPromises.push(this.uploadFile(this.mergedPath, 'merged', 'video/webm'));
-    } else {
-      // Upload video
-      if (this.videoPath && fs.existsSync(this.videoPath)) {
-        uploadPromises.push(this.uploadFile(this.videoPath, 'video', 'video/webm'));
+    if (this.config.format === 'mp3') {
+      // Audio-only: upload the MP3 file
+      if (this.audioPath && fs.existsSync(this.audioPath)) {
+        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', this.formatConfig.mimeType));
       }
-    }
-
-    // Always upload audio separately for transcription (validate it has actual content)
-    if (this.audioPath && fs.existsSync(this.audioPath)) {
-      const audioSize = fs.statSync(this.audioPath).size;
-      if (audioSize > 1024) {
-        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', 'audio/wav'));
+    } else {
+      // Upload merged file if available, otherwise upload video and audio separately
+      if (this.mergedPath && fs.existsSync(this.mergedPath)) {
+        uploadPromises.push(this.uploadFile(this.mergedPath, 'merged', this.formatConfig.mimeType));
       } else {
-        logger.warn(`Audio file too small (${audioSize} bytes), likely empty — skipping upload`);
-        this.s3AudioUrl = null;
+        // Upload video
+        if (this.videoPath && fs.existsSync(this.videoPath)) {
+          uploadPromises.push(this.uploadFile(this.videoPath, 'video', this.formatConfig.mimeType));
+        }
+      }
+
+      // Always upload audio separately for transcription
+      if (this.audioPath && fs.existsSync(this.audioPath)) {
+        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', 'audio/wav'));
       }
     }
 
@@ -675,7 +945,7 @@ export class RecordingOrchestrator extends EventEmitter {
       queueSize: 4,
     });
 
-    upload.on('httpUploadProgress', (progress) => {
+    upload.on('httpUploadProgress', (progress: { loaded?: number; total?: number }) => {
       if (progress.loaded && progress.total) {
         const percentage = Math.round((progress.loaded / progress.total) * 100);
         logger.debug(`Upload progress (${type}): ${percentage}%`);

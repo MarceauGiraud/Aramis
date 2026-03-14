@@ -59,13 +59,6 @@ interface Participant {
   leftAt?: string;
 }
 
-interface SpeakingStat {
-  name: string;
-  duration: number;
-  percentage: number;
-  segmentCount: number;
-}
-
 interface Meeting {
   id: string;
   title: string;
@@ -82,7 +75,6 @@ interface Meeting {
   transcript?: Transcript;
   summary?: Summary;
   participants?: Participant[];
-  speakingStats?: SpeakingStat[];
 }
 
 const platformNames: Record<string, string> = {
@@ -173,8 +165,9 @@ export default function MeetingDetailPage() {
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'transcript' | 'summary' | 'participants'>('transcript');
+  const [activeTab, setActiveTab] = useState<'transcript' | 'summary' | 'participants' | 'chat'>('transcript');
   const [searchQuery, setSearchQuery] = useState('');
+  const [pauseLoading, setPauseLoading] = useState(false);
 
   useEffect(() => {
     async function fetchMeeting() {
@@ -201,6 +194,28 @@ export default function MeetingDetailPage() {
       fetchMeeting();
     }
   }, [params.id]);
+
+  const handlePause = async () => {
+    setPauseLoading(true);
+    try {
+      await fetch(`/api/bots/${params.id}/pause`, { method: 'POST' });
+    } catch {
+      // Ignore errors
+    } finally {
+      setPauseLoading(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setPauseLoading(true);
+    try {
+      await fetch(`/api/bots/${params.id}/resume`, { method: 'POST' });
+    } catch {
+      // Ignore errors
+    } finally {
+      setPauseLoading(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -268,6 +283,25 @@ export default function MeetingDetailPage() {
                 {platformNames[meeting.platform]} - {formatDate(meeting.scheduledStart)}
               </p>
             </div>
+            {/* Pause/Resume buttons */}
+            {meeting.status === 'RECORDING' && (
+              <div className="flex gap-2">
+                <button
+                  onClick={handlePause}
+                  disabled={pauseLoading}
+                  className="px-4 py-2 text-sm font-medium text-yellow-700 bg-yellow-100 rounded-lg hover:bg-yellow-200 disabled:opacity-50"
+                >
+                  {pauseLoading ? '...' : 'Pause'}
+                </button>
+                <button
+                  onClick={handleResume}
+                  disabled={pauseLoading}
+                  className="px-4 py-2 text-sm font-medium text-green-700 bg-green-100 rounded-lg hover:bg-green-200 disabled:opacity-50"
+                >
+                  {pauseLoading ? '...' : 'Reprendre'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -389,6 +423,16 @@ export default function MeetingDetailPage() {
                 }`}
               >
                 Participants ({meeting.participants?.length || 0})
+              </button>
+              <button
+                onClick={() => setActiveTab('chat')}
+                className={`px-6 py-3 text-sm font-medium border-b-2 ${
+                  activeTab === 'chat'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Chat
               </button>
             </nav>
           </div>
@@ -564,59 +608,8 @@ export default function MeetingDetailPage() {
             {/* Participants Tab */}
             {activeTab === 'participants' && (
               <div>
-                {/* Speaking Stats */}
-                {meeting.speakingStats && meeting.speakingStats.length > 0 && (
-                  <div className="mb-6">
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">
-                      Temps de parole
-                    </h3>
-                    <div className="space-y-3">
-                      {meeting.speakingStats
-                        .sort((a, b) => b.percentage - a.percentage)
-                        .map((stat, index) => (
-                          <div key={index} className="flex items-center gap-3">
-                            <div className="w-32 text-sm text-gray-700 truncate font-medium">
-                              {stat.name}
-                            </div>
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2">
-                                <div className="flex-1 bg-gray-200 rounded-full h-4 overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full ${
-                                      [
-                                        'bg-blue-500',
-                                        'bg-green-500',
-                                        'bg-purple-500',
-                                        'bg-orange-500',
-                                        'bg-pink-500',
-                                        'bg-cyan-500',
-                                      ][index % 6]
-                                    }`}
-                                    style={{ width: `${stat.percentage}%` }}
-                                  />
-                                </div>
-                                <span className="text-sm text-gray-600 w-12 text-right">
-                                  {stat.percentage}%
-                                </span>
-                              </div>
-                            </div>
-                            <div className="text-xs text-gray-400 w-24 text-right">
-                              {formatDuration(stat.duration)} ({stat.segmentCount} seg.)
-                            </div>
-                          </div>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Participant List */}
                 {meeting.participants && meeting.participants.length > 0 ? (
                   <div className="space-y-2">
-                    {meeting.speakingStats && meeting.speakingStats.length > 0 && (
-                      <h3 className="text-sm font-semibold text-gray-700 mb-3">
-                        Participants
-                      </h3>
-                    )}
                     {meeting.participants.map((participant) => (
                       <div
                         key={participant.id}
@@ -653,11 +646,26 @@ export default function MeetingDetailPage() {
                       </div>
                     ))}
                   </div>
-                ) : !meeting.speakingStats?.length ? (
+                ) : (
                   <div className="text-center py-12 text-gray-500">
                     <p>Aucun participant enregistré</p>
                   </div>
-                ) : null}
+                )}
+              </div>
+            )}
+
+            {/* Chat Tab */}
+            {activeTab === 'chat' && (
+              <div className="text-center py-12">
+                <Link
+                  href={`/dashboard/meetings/${meeting.id}/chat`}
+                  className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Voir le chat complet
+                </Link>
+                <p className="text-sm text-gray-500 mt-4">
+                  Les messages de chat sont disponibles sur la page dediee.
+                </p>
               </div>
             )}
           </div>

@@ -93,3 +93,18 @@ export const WEBHOOK_EVENT_TYPES = {
 // Redis pub/sub channels for bot commands
 export const BOT_COMMANDS_CHANNEL = 'bot:commands';
 export const BOT_EVENTS_CHANNEL = 'bot:events';
+
+// Bot command types
+export const BOT_COMMAND_TYPES = {
+  PAUSE: 'pause',
+  RESUME: 'resume',
+  LEAVE: 'leave',
+  SEND_CHAT: 'send_chat',
+  OUTPUT_AUDIO: 'output_audio',
+} as const;
+
+// Stale bot threshold (10 minutes without heartbeat)
+export const STALE_BOT_THRESHOLD_MS = 10 * 60 * 1000;
+
+// Default chunk retention period in days
+export const DEFAULT_CHUNK_RETENTION_DAYS = 30;

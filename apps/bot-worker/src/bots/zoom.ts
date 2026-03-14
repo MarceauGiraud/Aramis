@@ -1,4 +1,4 @@
-import { BaseMeetingBot, BotConfig, BotOptions, ActiveSpeaker, ParticipantInfo } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions } from './base';
 import { logger } from '../lib/logger';
 
 /**
@@ -13,7 +13,7 @@ export class ZoomBot extends BaseMeetingBot {
   private lastKnownParticipantCount = 0;
 
   constructor(config: BotConfig, options?: BotOptions) {
-    super(config, options);
+    super({ ...config, platform: config.platform ?? 'ZOOM' }, options);
   }
 
   async join(): Promise<void> {
@@ -85,9 +85,6 @@ export class ZoomBot extends BaseMeetingBot {
     this.joinedAt = new Date();
     logger.info('Successfully joined Zoom meeting');
     await this.takeDebugScreenshot('07_joined_successfully');
-
-    // Wait for WebRTC to fully connect before starting recording
-    await this.waitForWebRTCReady();
 
     // Start recording
     await this.startRecording();
@@ -641,114 +638,65 @@ export class ZoomBot extends BaseMeetingBot {
     return false;
   }
 
-  async detectActiveSpeaker(): Promise<ActiveSpeaker | null> {
-    if (!this.page) return null;
-    try {
-      return await this.page.evaluate(() => {
-        // Zoom highlights the speaking participant with a green/blue border
-        const tiles = document.querySelectorAll('.video-avatar, [class*="participant" i]');
-        for (const tile of tiles) {
-          const style = getComputedStyle(tile);
-          const outline = style.outlineColor || '';
-          const border = style.borderColor || '';
-          const isColored = (c: string) =>
-            !!c && c !== 'transparent' && c !== 'rgba(0, 0, 0, 0)' && !c.startsWith('rgb(0, 0, 0');
-          if (isColored(outline) || isColored(border)) {
-            const nameEl = tile.querySelector('.video-avatar__name, [class*="name" i], span');
-            const name = nameEl?.textContent?.trim();
-            if (name) return { name };
-          }
-        }
-        // Fallback: active speaker view shows name
-        const activeSpeaker = document.querySelector('.active-speaker-name, [class*="active-speaker" i]');
-        if (activeSpeaker) {
-          const name = activeSpeaker.textContent?.trim();
-          if (name) return { name };
-        }
-        return null;
-      });
-    } catch { return null; }
-  }
-
   /**
-   * Extract participant details from Zoom's DOM.
-   * Reads the participant list panel or video tiles.
+   * Check for breakout room invitation and auto-join
    */
-  async extractParticipants(): Promise<ParticipantInfo[]> {
-    if (!this.page) return [];
+  async checkForBreakoutRoom(): Promise<boolean> {
+    if (!this.page) return false;
 
     try {
-      // Try to open participants panel
-      const panelSelectors = [
-        '[aria-label*="Participants" i]',
-        '[aria-label*="participant" i]',
-        '.footer-participants',
-        '#participants-btn',
+      // Zoom shows a dialog/banner when invited to a breakout room
+      const breakoutSelectors = [
+        'text=Join Breakout Room',
+        'text=Breakout Rooms',
+        'text=The host is inviting you to join Breakout Room',
+        '[aria-label*="Breakout Room" i]',
+        '.bo-room-invitation',
+        '#bo-invite-dialog',
+        '[data-tid="bo-invitation"]',
       ];
 
-      for (const selector of panelSelectors) {
-        try {
-          const btn = await this.page.$(selector);
-          if (btn) {
-            await btn.click();
-            await this.sleep(1000);
-            break;
+      for (const selector of breakoutSelectors) {
+        const el = await this.page.$(selector);
+        if (el) {
+          logger.info('Breakout room invitation detected');
+
+          // Pause recording during transition
+          if (this.recordingOrchestrator?.isRecording()) {
+            this.pauseRecording();
           }
-        } catch {
-          // try next
+
+          // Click join button
+          const joinSelectors = [
+            'button:has-text("Join")',
+            'button:has-text("Join Breakout Room")',
+            '.bo-room-invitation button',
+          ];
+
+          for (const joinSelector of joinSelectors) {
+            const joinBtn = await this.page.$(joinSelector);
+            if (joinBtn) {
+              await this.humanClick(joinSelector);
+              logger.info('Joined breakout room');
+
+              // Wait for transition
+              await this.sleep(3000);
+
+              // Resume recording
+              if (this.recordingOrchestrator?.isPaused()) {
+                this.resumeRecording();
+              }
+
+              return true;
+            }
+          }
         }
       }
-
-      const participants = await this.page.evaluate(() => {
-        const results: Array<{ name: string; email?: string; isHost?: boolean }> = [];
-        const seen = new Set<string>();
-
-        // Strategy 1: Participant list items
-        const listItems = document.querySelectorAll(
-          '.participants-ul li, .participants-list-item, [class*="participant-item" i]'
-        );
-
-        for (const item of listItems) {
-          const nameEl = item.querySelector(
-            '.participant-item-name, [class*="name" i], span'
-          );
-          const name = nameEl?.textContent?.trim();
-          if (!name || seen.has(name)) continue;
-          seen.add(name);
-
-          const itemText = item.textContent || '';
-          const isHost =
-            itemText.toLowerCase().includes('host') ||
-            itemText.toLowerCase().includes('(host)');
-
-          results.push({ name, isHost });
-        }
-
-        // Strategy 2: Video tiles (fallback)
-        if (results.length === 0) {
-          const tiles = document.querySelectorAll(
-            '.video-avatar, [data-user-id], .video-tile'
-          );
-          for (const tile of tiles) {
-            const nameEl = tile.querySelector(
-              '.video-avatar__name, [class*="name" i], span'
-            );
-            const name = nameEl?.textContent?.trim();
-            if (!name || seen.has(name)) continue;
-            seen.add(name);
-            results.push({ name, isHost: false });
-          }
-        }
-
-        return results;
-      });
-
-      logger.info(`Extracted ${participants.length} participants from Zoom`);
-      return participants;
     } catch (error) {
-      logger.warn(`Failed to extract participants: ${error}`);
-      return [];
+      logger.debug(`Breakout room check error: ${error}`);
     }
+
+    return false;
   }
 
   async leave(): Promise<void> {

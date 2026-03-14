@@ -2,31 +2,18 @@ import { createClient, DeepgramClient, LiveTranscriptionEvents } from '@deepgram
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { logger } from '../logger';
+import {
+  TranscriptionProvider,
+  TranscribeOptions,
+  TranscriptionResult,
+  TranscriptSegment,
+  TranscriptWord,
+  LiveTranscriptionSession,
+  LiveTranscriptionOptions,
+} from './provider-interface';
 
-export interface TranscriptSegment {
-  text: string;
-  startTime: number;
-  endTime: number;
-  confidence: number;
-  speaker?: string;
-  words: TranscriptWord[];
-}
-
-export interface TranscriptWord {
-  text: string;
-  startTime: number;
-  endTime: number;
-  confidence: number;
-}
-
-export interface TranscriptionResult {
-  segments: TranscriptSegment[];
-  fullText: string;
-  duration: number;
-  language: string;
-  speakers: string[];
-  confidence: number;
-}
+// Re-export shared types for backward compatibility
+export type { TranscriptSegment, TranscriptWord, TranscriptionResult };
 
 export interface DeepgramConfig {
   apiKey: string;
@@ -37,7 +24,17 @@ export interface DeepgramConfig {
   utterances?: boolean;
 }
 
-export class DeepgramTranscriptionService extends EventEmitter {
+/**
+ * Deepgram transcription provider.
+ *
+ * Supports both batch transcription (from URL or file) and live streaming transcription.
+ * Implements the TranscriptionProvider interface for use with the provider factory.
+ *
+ * Also extends EventEmitter for backward compatibility with existing code that
+ * listens to events directly on the service instance.
+ */
+export class DeepgramTranscriptionService extends EventEmitter implements TranscriptionProvider {
+  readonly name = 'deepgram';
   private client: DeepgramClient;
   private config: DeepgramConfig;
 
@@ -46,7 +43,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
     this.config = {
       apiKey: config?.apiKey || process.env.DEEPGRAM_API_KEY || '',
       model: config?.model || 'nova-2',
-      language: config?.language || 'multi',
+      language: config?.language || 'en',
       diarize: config?.diarize ?? true,
       punctuate: config?.punctuate ?? true,
       utterances: config?.utterances ?? true,
@@ -56,9 +53,16 @@ export class DeepgramTranscriptionService extends EventEmitter {
   }
 
   /**
+   * Whether this provider supports live transcription
+   */
+  supportsLiveTranscription(): boolean {
+    return true;
+  }
+
+  /**
    * Transcribe an audio file
    */
-  async transcribeFile(audioPath: string): Promise<TranscriptionResult> {
+  async transcribeFile(audioPath: string, options?: TranscribeOptions): Promise<TranscriptionResult> {
     logger.info(`Transcribing file: ${audioPath}`);
 
     const audioBuffer = fs.readFileSync(audioPath);
@@ -66,10 +70,9 @@ export class DeepgramTranscriptionService extends EventEmitter {
     const { result, error } = await this.client.listen.prerecorded.transcribeFile(
       audioBuffer,
       {
-        model: this.config.model,
-        language: this.config.language,
-        detect_language: true,
-        diarize: this.config.diarize,
+        model: (options?.model as DeepgramConfig['model']) || this.config.model,
+        language: options?.language || this.config.language,
+        diarize: options?.diarize ?? this.config.diarize,
         punctuate: this.config.punctuate,
         utterances: this.config.utterances,
         smart_format: true,
@@ -86,16 +89,15 @@ export class DeepgramTranscriptionService extends EventEmitter {
   /**
    * Transcribe from URL
    */
-  async transcribeUrl(audioUrl: string): Promise<TranscriptionResult> {
+  async transcribeUrl(audioUrl: string, options?: TranscribeOptions): Promise<TranscriptionResult> {
     logger.info(`Transcribing URL: ${audioUrl}`);
 
     const { result, error } = await this.client.listen.prerecorded.transcribeUrl(
       { url: audioUrl },
       {
-        model: this.config.model,
-        language: this.config.language,
-        detect_language: true,
-        diarize: this.config.diarize,
+        model: (options?.model as DeepgramConfig['model']) || this.config.model,
+        language: options?.language || this.config.language,
+        diarize: options?.diarize ?? this.config.diarize,
         punctuate: this.config.punctuate,
         utterances: this.config.utterances,
         smart_format: true,
@@ -110,24 +112,32 @@ export class DeepgramTranscriptionService extends EventEmitter {
   }
 
   /**
-   * Start live transcription
+   * Start live transcription session implementing LiveTranscriptionSession interface
    */
-  async startLiveTranscription(): Promise<{
-    send: (audioData: Buffer) => void;
-    close: () => void;
-  }> {
+  async startLiveTranscription(options?: LiveTranscriptionOptions): Promise<LiveTranscriptionSession> {
     const connection = this.client.listen.live({
-      model: this.config.model,
-      language: this.config.language,
-      diarize: this.config.diarize,
+      model: (options?.model as DeepgramConfig['model']) || this.config.model,
+      language: options?.language || this.config.language,
+      diarize: options?.diarize ?? this.config.diarize,
       punctuate: this.config.punctuate,
-      interim_results: true,
+      interim_results: options?.interimResults ?? true,
       utterance_end_ms: 1000,
       vad_events: true,
-      encoding: 'linear16',
-      sample_rate: 16000,
-      channels: 1,
+      encoding: options?.encoding || 'linear16',
+      sample_rate: options?.sampleRate || 16000,
+      channels: options?.channels || 1,
     });
+
+    const session = new EventEmitter() as EventEmitter & LiveTranscriptionSession;
+
+    // Implement send and close
+    session.send = (audioData: Buffer) => {
+      connection.send(audioData);
+    };
+
+    session.close = () => {
+      connection.finish();
+    };
 
     connection.on(LiveTranscriptionEvents.Open, () => {
       logger.info('Deepgram live connection opened');
@@ -151,28 +161,25 @@ export class DeepgramTranscriptionService extends EventEmitter {
           })),
         };
 
+        session.emit('transcript', segment, data.is_final);
+        // Also emit on the service for backward compatibility
         this.emit('transcript', segment, data.is_final);
       }
     });
 
     connection.on(LiveTranscriptionEvents.Error, (error) => {
       logger.error('Deepgram error:', error);
+      session.emit('error', error instanceof Error ? error : new Error(String(error)));
       this.emit('error', error);
     });
 
     connection.on(LiveTranscriptionEvents.Close, () => {
       logger.info('Deepgram connection closed');
+      session.emit('close');
       this.emit('close');
     });
 
-    return {
-      send: (audioData: Buffer) => {
-        connection.send(audioData as unknown as string);
-      },
-      close: () => {
-        connection.finish();
-      },
-    };
+    return session;
   }
 
   /**
@@ -229,7 +236,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
         if (!currentSegment || currentSegment.speaker !== speaker) {
           if (currentSegment) {
             segments.push(currentSegment);
-            totalConfidence += currentSegment.confidence;
+            totalConfidence += currentSegment.confidence || 0;
             segmentCount++;
           }
 
@@ -249,7 +256,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
         } else {
           currentSegment.text += ' ' + (word.word || word.punctuated_word);
           currentSegment.endTime = word.end;
-          currentSegment.words.push({
+          currentSegment.words!.push({
             text: word.word || word.punctuated_word,
             startTime: word.start,
             endTime: word.end,
@@ -260,7 +267,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
 
       if (currentSegment) {
         segments.push(currentSegment);
-        totalConfidence += currentSegment.confidence;
+        totalConfidence += currentSegment.confidence || 0;
         segmentCount++;
       }
     }
@@ -274,7 +281,6 @@ export class DeepgramTranscriptionService extends EventEmitter {
       duration,
       language,
       speakers: Array.from(speakerSet),
-      confidence: segmentCount > 0 ? totalConfidence / segmentCount : 0,
     };
   }
 }
