@@ -140,7 +140,7 @@ export class RecordingOrchestrator extends EventEmitter {
     this.config = {
       meetingId: config.meetingId,
       display: config.display ?? process.env.DISPLAY ?? ':99',
-      audioSource: config.audioSource ?? 'default',
+      audioSource: config.audioSource ?? process.env.PULSE_SOURCE ?? 'default',
       tempDir: config.tempDir ?? '/tmp/recordings',
       chunkDurationSec: config.chunkDurationSec ?? 30,
       resolution: config.resolution ?? { width: 1920, height: 1080 },
@@ -423,26 +423,28 @@ export class RecordingOrchestrator extends EventEmitter {
 
     logger.info('Stopping video capture');
 
+    const proc = this.videoProcess;
+
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         logger.warn('Video capture did not stop gracefully, forcing kill');
-        this.videoProcess?.kill('SIGKILL');
+        proc.kill('SIGKILL');
         resolve();
       }, 10000);
 
-      this.videoProcess.on('exit', () => {
+      proc.on('exit', () => {
         clearTimeout(timeout);
         this.videoProcess = null;
         resolve();
       });
 
       // Send 'q' to FFmpeg to gracefully stop
-      this.videoProcess.stdin?.write('q');
-      this.videoProcess.stdin?.end();
+      proc.stdin?.write('q');
+      proc.stdin?.end();
 
       // Also send SIGTERM as backup
       setTimeout(() => {
-        this.videoProcess?.kill('SIGTERM');
+        if (!proc.killed) proc.kill('SIGTERM');
       }, 1000);
     });
   }
@@ -452,7 +454,7 @@ export class RecordingOrchestrator extends EventEmitter {
   // ==========================================================================
 
   private async startAudioCapture(): Promise<void> {
-    logger.info(`Starting audio capture from source ${this.config.audioSource}`);
+    logger.info(`Starting audio capture from source: '${this.config.audioSource}' (PULSE_SOURCE env: '${process.env.PULSE_SOURCE || 'not set'}')`);
 
     const args = [
       // Input from PulseAudio
@@ -508,26 +510,28 @@ export class RecordingOrchestrator extends EventEmitter {
 
     logger.info('Stopping audio capture');
 
+    const proc = this.audioProcess;
+
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         logger.warn('Audio capture did not stop gracefully, forcing kill');
-        this.audioProcess?.kill('SIGKILL');
+        proc.kill('SIGKILL');
         resolve();
       }, 10000);
 
-      this.audioProcess.on('exit', () => {
+      proc.on('exit', () => {
         clearTimeout(timeout);
         this.audioProcess = null;
         resolve();
       });
 
       // Send 'q' to FFmpeg to gracefully stop
-      this.audioProcess.stdin?.write('q');
-      this.audioProcess.stdin?.end();
+      proc.stdin?.write('q');
+      proc.stdin?.end();
 
       // Also send SIGTERM as backup
       setTimeout(() => {
-        this.audioProcess?.kill('SIGTERM');
+        if (!proc.killed) proc.kill('SIGTERM');
       }, 1000);
     });
   }
@@ -547,6 +551,11 @@ export class RecordingOrchestrator extends EventEmitter {
     }
     if (!fs.existsSync(this.audioPath)) {
       logger.warn(`Audio file not found, skipping merge: ${this.audioPath}`);
+      return;
+    }
+    const audioSize = fs.statSync(this.audioPath).size;
+    if (audioSize <= 1024) {
+      logger.warn(`Audio file too small for merge (${audioSize} bytes), skipping`);
       return;
     }
 
@@ -624,9 +633,15 @@ export class RecordingOrchestrator extends EventEmitter {
       }
     }
 
-    // Always upload audio separately for transcription
+    // Always upload audio separately for transcription (validate it has actual content)
     if (this.audioPath && fs.existsSync(this.audioPath)) {
-      uploadPromises.push(this.uploadFile(this.audioPath, 'audio', 'audio/wav'));
+      const audioSize = fs.statSync(this.audioPath).size;
+      if (audioSize > 1024) {
+        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', 'audio/wav'));
+      } else {
+        logger.warn(`Audio file too small (${audioSize} bytes), likely empty — skipping upload`);
+        this.s3AudioUrl = null;
+      }
     }
 
     await Promise.all(uploadPromises);

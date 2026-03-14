@@ -16,6 +16,7 @@ model User {
   name          String?
   image         String?
   emailVerified DateTime?
+  passwordHash  String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -27,6 +28,11 @@ model User {
   recordingRules      RecordingRule[]
   shares              Share[]
   apiKeys             ApiKey[]
+  orgMemberships      OrganizationMember[]
+  creditBalance       CreditBalance?
+  creditTransactions  CreditTransaction[]
+  stripeCustomer      StripeCustomer?
+  webhooks            Webhook[]
 }
 
 model Account {
@@ -67,9 +73,14 @@ model VerificationToken {
 model ApiKey {
   id        String    @id @default(cuid())
   key       String    @unique
+  hashedKey String?   @unique
   name      String
   userId    String
+  projectId String?
+  scopes    String[]
+  isActive  Boolean   @default(true)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project?  @relation(fields: [projectId], references: [id])
   createdAt DateTime  @default(now())
   lastUsed  DateTime?
   expiresAt DateTime?
@@ -153,6 +164,7 @@ model CalendarEvent {
 model Meeting {
   id              String          @id @default(cuid())
   userId          String
+  projectId       String?
   calendarEventId String?         @unique
   title           String
   description     String?         @db.Text
@@ -167,17 +179,29 @@ model Meeting {
   botName         String          @default("Aramis Recorder")
   errorMessage    String?
   retryCount      Int             @default(0)
+
+  // Recording configuration
+  deduplicationKey String?        @unique
+  recordingFormat  String         @default("webm") // webm | mp4 | mp3
+  recordingView    String         @default("speaker") // speaker | gallery
+  resolution       String         @default("1080p") // 1080p | 720p
+  noRecordingMode  Boolean        @default(false)
+  metadata         Json?
+
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project?       @relation(fields: [projectId], references: [id])
   calendarEvent CalendarEvent? @relation(fields: [calendarEventId], references: [id])
   recording     Recording?
-  transcript    Transcript?
+  transcripts   Transcript[]
   summary       MeetingSummary?
   shares        Share[]
   participants  Participant[]
   botSession    BotSession?
+  chatMessages  ChatMessage[]
+  meetingWebhooks MeetingWebhook[]
 }
 
 enum MeetingPlatform {
@@ -191,8 +215,10 @@ enum MeetingStatus {
   JOINING
   WAITING
   RECORDING
+  RECORDING_PAUSED
   STOPPED
   PROCESSING
+  POST_PROCESSING
   COMPLETED
   FAILED
   CANCELLED
@@ -230,6 +256,12 @@ model Recording {
   height    Int?
   frameRate Int?
   codec     String?
+
+  // Recording config
+  format             String? // webm | mp4 | mp3
+  view               String? // speaker | gallery
+  pauseEvents        Json?   // Array of {pausedAt, resumedAt}
+  totalPauseDuration Int?    // in seconds
 
   // Processing
   processedAt  DateTime?
@@ -271,7 +303,7 @@ model RecordingChunk {
 
 model Transcript {
   id           String           @id @default(cuid())
-  meetingId    String           @unique
+  meetingId    String
   status       TranscriptStatus @default(PENDING)
 
   // Content
@@ -294,6 +326,8 @@ model Transcript {
   meeting  Meeting             @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   segments TranscriptSegment[]
   speakers TranscriptSpeaker[]
+
+  @@unique([meetingId, provider])
 }
 
 enum TranscriptStatus {
@@ -482,11 +516,15 @@ model Share {
 // ==================== BOT SESSION ====================
 
 model BotSession {
-  id        String    @id @default(cuid())
-  meetingId String    @unique
-  workerId  String?
-  status    BotStatus @default(IDLE)
-  lastPing  DateTime?
+  id               String    @id @default(cuid())
+  meetingId        String    @unique
+  workerId         String?
+  status           BotStatus @default(IDLE)
+  lastPing         DateTime?
+  heartbeatAt      DateTime?
+  deduplicationKey String?   @unique
+  metadata         Json?
+  creditsUsed      Int?
 
   logs BotLog[]
 
@@ -500,6 +538,9 @@ enum BotStatus {
   IDLE
   STARTING
   RUNNING
+  WAITING_ROOM
+  PAUSED
+  POST_PROCESSING
   STOPPED
   ERROR
 }
@@ -552,6 +593,7 @@ enum JobType {
   TRANSCRIBE
   GENERATE_SUMMARY
   SYNC_CALENDAR
+  WEBHOOK_DELIVERY
 }
 
 enum JobStatus {
@@ -560,4 +602,163 @@ enum JobStatus {
   COMPLETED
   FAILED
   CANCELLED
+}
+
+// ==================== CHAT ====================
+
+model ChatMessage {
+  id        String          @id @default(cuid())
+  meetingId String
+  sender    String
+  message   String          @db.Text
+  timestamp DateTime
+  platform  MeetingPlatform
+  createdAt DateTime        @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, timestamp])
+}
+
+// ==================== WEBHOOKS ====================
+
+model Webhook {
+  id        String   @id @default(cuid())
+  userId    String
+  url       String
+  secret    String
+  events    String[]
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+}
+
+model MeetingWebhook {
+  id        String   @id @default(cuid())
+  meetingId String
+  webhookId String
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, webhookId])
+}
+
+model WebhookDelivery {
+  id          String    @id @default(cuid())
+  webhookId   String
+  event       String
+  payload     Json
+  statusCode  Int?
+  response    String?   @db.Text
+  attempt     Int       @default(1)
+  maxAttempts Int       @default(5)
+  deliveredAt DateTime?
+  nextRetryAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([nextRetryAt])
+}
+
+// ==================== ORGANIZATIONS ====================
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("free")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects    Project[]
+  members     OrganizationMember[]
+  invitations Invitation[]
+}
+
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           OrgRole  @default(MEMBER)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model Project {
+  id                String   @id @default(cuid())
+  organizationId    String
+  name              String
+  maxConcurrentBots Int      @default(2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  meetings     Meeting[]
+  apiKeys      ApiKey[]
+
+  @@unique([organizationId, name])
+}
+
+model Invitation {
+  id             String    @id @default(cuid())
+  organizationId String
+  email          String
+  role           OrgRole   @default(MEMBER)
+  token          String    @unique @default(cuid())
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+// ==================== BILLING ====================
+
+model CreditBalance {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  projectId String?
+  balance   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CreditTransaction {
+  id          String   @id @default(cuid())
+  userId      String
+  projectId   String?
+  amount      Int
+  type        String   // purchase, usage, refund, bonus
+  description String?
+  referenceId String?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model StripeCustomer {
+  id               String @id @default(cuid())
+  userId           String @unique
+  stripeCustomerId String @unique
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

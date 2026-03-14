@@ -370,7 +370,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
           return { success: false, error: `Unknown tool: ${name}` };
       }
     } catch (error) {
-      logger.error(`Tool ${name} failed:`, error);
+      logger.error(`Tool ${name} failed:`, error as Error);
       return { success: false, error: String(error) };
     }
   }

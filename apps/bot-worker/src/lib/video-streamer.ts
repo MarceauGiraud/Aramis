@@ -223,7 +223,7 @@ export class VideoStreamer extends EventEmitter {
         }
       };
 
-      const proc = this.ffmpegProcess;
+      const proc = this.ffmpegProcess!;
       proc.once('close', onClose);
 
       // Send 'q' to FFmpeg's stdin to gracefully stop recording

@@ -1,4 +1,4 @@
-import { BaseMeetingBot, BotConfig, BotOptions } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions, ActiveSpeaker, ParticipantInfo } from './base';
 import { logger } from '../lib/logger';
 
 /**
@@ -80,6 +80,9 @@ export class TeamsBot extends BaseMeetingBot {
     this.joinedAt = new Date();
     logger.info('Successfully joined Teams meeting');
     await this.takeDebugScreenshot('07_joined_successfully');
+
+    // Wait for WebRTC to fully connect before starting recording
+    await this.waitForWebRTCReady();
 
     // Start recording
     await this.startRecording();
@@ -605,6 +608,116 @@ export class TeamsBot extends BaseMeetingBot {
     }
 
     return false;
+  }
+
+  async detectActiveSpeaker(): Promise<ActiveSpeaker | null> {
+    if (!this.page) return null;
+    try {
+      return await this.page.evaluate(() => {
+        // Teams shows a colored border on the speaking participant's video tile
+        const tiles = document.querySelectorAll('[data-tid="video-tile"], [data-cid]');
+        for (const tile of tiles) {
+          const style = getComputedStyle(tile);
+          const outline = style.outlineColor || '';
+          const border = style.borderColor || '';
+          const isColored = (c: string) =>
+            !!c && c !== 'transparent' && c !== 'rgba(0, 0, 0, 0)' && !c.startsWith('rgb(0, 0, 0');
+          if (isColored(outline) || isColored(border)) {
+            const nameEl = tile.querySelector('[data-tid="participant-name"], [class*="name" i], span');
+            const name = nameEl?.textContent?.trim();
+            if (name) return { name };
+          }
+        }
+        // Fallback: check the main/spotlight speaker area
+        const spotlight = document.querySelector('[data-tid="active-speaker-name"], [class*="speaker" i]');
+        if (spotlight) {
+          const name = spotlight.textContent?.trim();
+          if (name) return { name };
+        }
+        return null;
+      });
+    } catch { return null; }
+  }
+
+  /**
+   * Extract participant details from Teams' DOM.
+   * Reads the roster panel or video tiles.
+   */
+  async extractParticipants(): Promise<ParticipantInfo[]> {
+    if (!this.page) return [];
+
+    try {
+      // Try to open the roster/people panel
+      const rosterBtnSelectors = [
+        '[data-tid="roster-button"]',
+        '[data-tid="people-button"]',
+        '[aria-label*="participant" i]',
+        '[aria-label*="people" i]',
+      ];
+
+      for (const selector of rosterBtnSelectors) {
+        try {
+          const btn = await this.page.$(selector);
+          if (btn) {
+            await btn.click();
+            await this.sleep(1000);
+            break;
+          }
+        } catch {
+          // try next
+        }
+      }
+
+      const participants = await this.page.evaluate(() => {
+        const results: Array<{ name: string; email?: string; isHost?: boolean }> = [];
+        const seen = new Set<string>();
+
+        // Strategy 1: Roster list items
+        const listItems = document.querySelectorAll(
+          '[data-tid="roster-participant"], .calling-roster-item, [data-tid*="roster-item"]'
+        );
+
+        for (const item of listItems) {
+          const nameEl = item.querySelector(
+            '[data-tid="participant-name"], [class*="name" i], span'
+          );
+          const name = nameEl?.textContent?.trim();
+          if (!name || seen.has(name)) continue;
+          seen.add(name);
+
+          const itemText = item.textContent || '';
+          const isHost =
+            itemText.toLowerCase().includes('organizer') ||
+            itemText.toLowerCase().includes('organisateur');
+
+          results.push({ name, isHost });
+        }
+
+        // Strategy 2: Video tiles (fallback)
+        if (results.length === 0) {
+          const tiles = document.querySelectorAll(
+            '[data-tid="video-tile"], [data-cid], [data-tid="calling-user-video-tile"]'
+          );
+          for (const tile of tiles) {
+            const nameEl = tile.querySelector(
+              '[data-tid="participant-name"], [class*="name" i], span'
+            );
+            const name = nameEl?.textContent?.trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            results.push({ name, isHost: false });
+          }
+        }
+
+        return results;
+      });
+
+      logger.info(`Extracted ${participants.length} participants from Teams`);
+      return participants;
+    } catch (error) {
+      logger.warn(`Failed to extract participants: ${error}`);
+      return [];
+    }
   }
 
   async leave(): Promise<void> {

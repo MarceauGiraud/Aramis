@@ -46,7 +46,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
     this.config = {
       apiKey: config?.apiKey || process.env.DEEPGRAM_API_KEY || '',
       model: config?.model || 'nova-2',
-      language: config?.language || 'en',
+      language: config?.language || 'multi',
       diarize: config?.diarize ?? true,
       punctuate: config?.punctuate ?? true,
       utterances: config?.utterances ?? true,
@@ -68,6 +68,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
       {
         model: this.config.model,
         language: this.config.language,
+        detect_language: true,
         diarize: this.config.diarize,
         punctuate: this.config.punctuate,
         utterances: this.config.utterances,
@@ -93,6 +94,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
       {
         model: this.config.model,
         language: this.config.language,
+        detect_language: true,
         diarize: this.config.diarize,
         punctuate: this.config.punctuate,
         utterances: this.config.utterances,
@@ -165,7 +167,7 @@ export class DeepgramTranscriptionService extends EventEmitter {
 
     return {
       send: (audioData: Buffer) => {
-        connection.send(audioData);
+        connection.send(audioData as unknown as string);
       },
       close: () => {
         connection.finish();

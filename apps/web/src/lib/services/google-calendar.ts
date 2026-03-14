@@ -75,7 +75,7 @@ export class GoogleCalendarService {
 
     return {
       accessToken: tokens.access_token!,
-      refreshToken: tokens.refresh_token,
+      refreshToken: tokens.refresh_token ?? undefined,
       expiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined,
       email: userInfo.email!,
     };

@@ -9,8 +9,12 @@ import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { QUEUE_NAMES, JOB_TYPES } from '@aramis/shared';
 import { MeetingBotFactory } from './bots/factory';
+import { createTranscriptionWorker } from './transcription-worker';
 import { logger } from './lib/logger';
 import { isS3Configured } from './lib/s3-config';
+import * as fs from 'fs';
+import { uploadRecording, uploadAudio } from './lib/storage';
+import { createSummaryWorker } from './summary-worker';
 
 const redis = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
@@ -54,10 +58,11 @@ const meetingWorker = new Worker(
       throw new Error(`Meeting not found: ${meetingId}`);
     }
 
-    // Skip if meeting was cancelled
-    if (meeting.status === 'CANCELLED') {
-      logger.info(`Meeting ${meetingId} was cancelled, skipping`);
-      return { success: false, reason: 'cancelled' };
+    // Skip if meeting is in a terminal state (don't retry completed/failed meetings)
+    const terminalStatuses = ['CANCELLED', 'COMPLETED', 'FAILED', 'PROCESSING'];
+    if (terminalStatuses.includes(meeting.status)) {
+      logger.info(`Meeting ${meetingId} is in terminal state '${meeting.status}', skipping retry`);
+      return { success: false, reason: meeting.status.toLowerCase() };
     }
 
     // Update or create bot session
@@ -100,57 +105,142 @@ const meetingWorker = new Worker(
       // Wait for meeting to end or bot to be stopped
       await bot.waitForEnd();
 
+      // Get participants — prefer cached (extracted during meeting) over live extraction
+      // The page may already be closed by the time we get here
+      let extractedParticipants = bot.getCachedParticipants();
+      if (extractedParticipants.length === 0) {
+        try {
+          extractedParticipants = await bot.extractParticipants();
+        } catch (extractError) {
+          logger.warn(`Failed to extract participants: ${extractError}`);
+        }
+      }
+      logger.info(`Participants: ${extractedParticipants.length} found`);
+
+      // Leave the meeting gracefully before saving recording
+      try {
+        await bot.leave();
+      } catch (leaveError) {
+        logger.warn(`Error leaving meeting: ${leaveError}`);
+      }
+
+      // Save extracted participants to DB
+      if (extractedParticipants.length > 0) {
+        try {
+          for (const p of extractedParticipants) {
+            await prisma.participant.create({
+              data: {
+                meetingId,
+                name: p.name,
+                email: p.email,
+                isHost: p.isHost || false,
+              },
+            });
+          }
+          logger.info(`Saved ${extractedParticipants.length} participants to DB`);
+        } catch (participantError) {
+          logger.warn(`Failed to save participants: ${participantError}`);
+        }
+      }
+
       // Process recording (orchestrator handles S3 upload internally)
-      const recordingPath = await bot.saveRecording();
-      const recordingInfo = bot.getRecordingInfo();
+      let recordingPath: string | null = null;
+      let recordingInfo: ReturnType<typeof bot.getRecordingInfo> = null;
+      try {
+        recordingPath = await bot.saveRecording();
+        recordingInfo = bot.getRecordingInfo();
+      } catch (recordingError) {
+        logger.warn(`Recording save failed (meeting still completed): ${recordingError}`);
+      }
 
-      // Determine the best video URL (S3 merged > S3 video > local path)
-      const videoUrl = recordingInfo?.s3MergedUrl
-        ?? recordingInfo?.s3VideoUrl
-        ?? recordingPath;
+      // Upload local recording to S3 if not already uploaded (Playwright mode)
+      let s3Uploaded = !!(recordingInfo?.s3MergedUrl || recordingInfo?.s3VideoUrl);
+      let s3VideoUrl: string | null = recordingInfo?.s3MergedUrl ?? recordingInfo?.s3VideoUrl ?? null;
 
-      const s3Uploaded = !!(recordingInfo?.s3MergedUrl || recordingInfo?.s3VideoUrl);
+      if (!s3Uploaded && recordingPath && isS3Configured()) {
+        try {
+          s3VideoUrl = await uploadRecording(recordingPath, meetingId);
+          s3Uploaded = true;
+          logger.info(`Recording uploaded to S3: ${s3VideoUrl}`);
+        } catch (uploadError) {
+          logger.error(`Failed to upload recording to S3: ${uploadError}`);
+        }
+      }
 
-      // Update meeting with recording info
+      // Upload separate audio file to S3 for transcription (Playwright mode)
+      // In FFmpeg mode, recordingInfo.s3AudioUrl is already set by the orchestrator.
+      // In Playwright mode, audio is captured to a local .webm file that needs separate upload.
+      let s3AudioUrl: string | null = recordingInfo?.s3AudioUrl ?? null;
+      if (!s3AudioUrl && isS3Configured()) {
+        const audioFilePath = bot.getAudioFilePath();
+        if (audioFilePath && fs.existsSync(audioFilePath) && fs.statSync(audioFilePath).size > 0) {
+          try {
+            s3AudioUrl = await uploadAudio(audioFilePath, meetingId);
+            logger.info(`Audio uploaded to S3: ${s3AudioUrl}`);
+          } catch (audioUploadError) {
+            logger.error(`Failed to upload audio to S3: ${audioUploadError}`);
+          }
+        }
+      }
+
+      // Best video URL: S3 > local path
+      const videoUrl = s3VideoUrl ?? recordingPath;
+
+      // Update meeting status
       await prisma.meeting.update({
         where: { id: meetingId },
         data: {
-          status: 'PROCESSING',
+          status: videoUrl ? 'PROCESSING' : 'COMPLETED',
           actualEnd: new Date(),
         },
       });
 
-      // Create recording record with both video and audio URLs
-      const recording = await prisma.recording.create({
-        data: {
-          meetingId,
-          videoUrl,
-          audioUrl: recordingInfo?.s3AudioUrl ?? undefined,
-          status: s3Uploaded ? 'COMPLETED' : 'PROCESSING',
-        },
-      });
-
-      logger.info(`Meeting ${meetingId} recording saved: ${videoUrl}`);
-      if (recordingInfo?.s3AudioUrl) {
-        logger.info(`Audio available at: ${recordingInfo.s3AudioUrl}`);
-      }
-
-      // Queue transcription job using the audio URL (better for transcription)
-      const audioUrl = recordingInfo?.s3AudioUrl ?? videoUrl;
-      if (s3Uploaded && process.env.DEEPGRAM_API_KEY) {
-        try {
-          await transcriptionQueue.add('transcribe', {
+      // Create recording record if we have a recording
+      if (videoUrl) {
+        const recording = await prisma.recording.create({
+          data: {
             meetingId,
-            recordingId: recording.id,
-            audioUrl, // Use dedicated audio URL for better transcription
-          }, {
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-          });
-          logger.info(`Queued transcription job for meeting ${meetingId}`);
-        } catch (queueError) {
-          logger.error(`Failed to queue transcription: ${queueError}`);
+            videoUrl,
+            audioUrl: s3AudioUrl ?? undefined,
+            status: s3Uploaded ? 'COMPLETED' : 'PROCESSING',
+          },
+        });
+
+        logger.info(`Meeting ${meetingId} recording saved: ${videoUrl}`);
+        if (s3AudioUrl) {
+          logger.info(`Audio available at: ${s3AudioUrl}`);
         }
+
+        // Queue transcription job with speaker timeline for name correlation
+        // Use dedicated audio URL when available; fall back to video URL
+        const audioUrl = s3AudioUrl ?? videoUrl;
+        const speakerTimeline = bot.getSpeakerTimeline();
+        if (speakerTimeline.length > 0) {
+          logger.info(`Speaker timeline: ${speakerTimeline.length} segments detected`);
+        }
+        if (s3Uploaded && process.env.DEEPGRAM_API_KEY) {
+          try {
+            // Collect per-track audio paths if available (for future per-speaker transcription)
+            const perTrackAudioPaths = typeof bot.getPerTrackAudioPaths === 'function'
+              ? bot.getPerTrackAudioPaths()
+              : undefined;
+            await transcriptionQueue.add('transcribe', {
+              meetingId,
+              recordingId: recording.id,
+              audioUrl,
+              speakerTimeline, // For correlating Deepgram "Speaker 0" with real names
+              ...(perTrackAudioPaths && perTrackAudioPaths.size > 0 && { perTrackAudioPaths: Object.fromEntries(perTrackAudioPaths) }),
+            }, {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 10000 },
+            });
+            logger.info(`Queued transcription job for meeting ${meetingId}`);
+          } catch (queueError) {
+            logger.error(`Failed to queue transcription: ${queueError}`);
+          }
+        }
+      } else {
+        logger.warn(`Meeting ${meetingId} completed without recording`);
       }
 
       return { success: true, recordingPath: videoUrl, s3Uploaded };
@@ -204,10 +294,20 @@ meetingWorker.on('failed', (job, err) => {
   logger.error(`Job ${job?.id} failed: ${err.message}`);
 });
 
+// Start transcription worker
+const transcriptionWorker = createTranscriptionWorker(redis);
+logger.info('Transcription worker started and listening for jobs');
+
+// Start summary worker
+const summaryWorker = createSummaryWorker(redis);
+logger.info('Summary worker started and listening for jobs');
+
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM, shutting down...');
   await meetingWorker.close();
+  await transcriptionWorker.close();
+  await summaryWorker.close();
   await transcriptionQueue.close();
   await redis.quit();
   process.exit(0);
@@ -216,6 +316,8 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   logger.info('Received SIGINT, shutting down...');
   await meetingWorker.close();
+  await transcriptionWorker.close();
+  await summaryWorker.close();
   await transcriptionQueue.close();
   await redis.quit();
   process.exit(0);

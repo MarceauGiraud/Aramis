@@ -11,7 +11,12 @@
   "dependencies": {
     "@aramis/database": "workspace:*",
     "@aramis/shared": "workspace:*",
+    "@aws-sdk/client-s3": "^3.490.0",
+    "@aws-sdk/s3-request-presigner": "^3.490.0",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
     "bullmq": "^5.1.0",
+    "google-auth-library": "^10.6.1",
+    "googleapis": "^171.4.0",
     "ioredis": "^5.3.2",
     "next": "14.1.0",
     "next-auth": "^4.24.5",

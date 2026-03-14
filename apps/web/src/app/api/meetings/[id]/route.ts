@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@aramis/database';
+import { resolveS3Url } from '@/lib/s3';
 
 // TODO: Replace with actual auth when implemented
 async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
@@ -38,9 +39,14 @@ export async function GET(
           include: {
             segments: {
               orderBy: { startTime: 'asc' },
+              include: {
+                speaker: true,
+              },
             },
+            speakers: true,
           },
         },
+        summary: true,
         botSession: {
           include: {
             logs: {
@@ -60,7 +66,45 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(meeting);
+    // Convert s3:// URLs to presigned HTTP URLs for browser playback
+    const result: any = { ...meeting };
+
+    // Compute speaking time statistics from TranscriptSpeaker data
+    if (meeting.transcript?.speakers && meeting.transcript.speakers.length > 0) {
+      const totalSpeakingTime = meeting.transcript.speakers.reduce(
+        (sum, s) => sum + (s.totalDuration || 0),
+        0
+      );
+      result.speakingStats = meeting.transcript.speakers.map((s) => ({
+        name: s.identifiedName || s.label,
+        duration: s.totalDuration || 0,
+        percentage:
+          totalSpeakingTime > 0
+            ? Math.round(((s.totalDuration || 0) / totalSpeakingTime) * 100)
+            : 0,
+        segmentCount: s.segmentCount,
+      }));
+    }
+
+    if (meeting.recording) {
+      result.recording = { ...meeting.recording };
+      if (meeting.recording.videoUrl) {
+        try {
+          result.recording.videoUrl = await resolveS3Url(meeting.recording.videoUrl);
+        } catch (e) {
+          console.error('Failed to resolve video URL:', e);
+        }
+      }
+      if (meeting.recording.audioUrl) {
+        try {
+          result.recording.audioUrl = await resolveS3Url(meeting.recording.audioUrl);
+        } catch (e) {
+          console.error('Failed to resolve audio URL:', e);
+        }
+      }
+    }
+
+    return NextResponse.json(result);
   } catch (error) {
     console.error('Error fetching meeting:', error);
     return NextResponse.json(

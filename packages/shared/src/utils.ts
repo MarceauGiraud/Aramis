@@ -1,7 +1,5 @@
-import { MeetingPlatform, MEETING_URL_PATTERNS } from './constants';
-
-// Re-export for convenience
-export { MeetingPlatform };
+import { MEETING_URL_PATTERNS } from './constants';
+import { MeetingPlatform } from './types';
 
 /**
  * Detect the meeting platform from a URL

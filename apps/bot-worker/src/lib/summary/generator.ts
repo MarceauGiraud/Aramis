@@ -282,7 +282,7 @@ export class SummaryGenerator {
         nextSteps: parsed.nextSteps,
       };
     } catch (error) {
-      logger.error('Failed to parse LLM response:', error);
+      logger.error('Failed to parse LLM response:', error as Error);
       throw new Error(`Failed to parse summary response: ${error}`);
     }
   }

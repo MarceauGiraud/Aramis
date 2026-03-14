@@ -80,7 +80,7 @@ export class TemplateProcessor {
           format: section.outputFormat,
         });
       } catch (error) {
-        logger.error(`Error processing section ${section.key}:`, error);
+        logger.error(`Error processing section ${section.key}:`, error as Error);
 
         if (section.required) {
           throw error;

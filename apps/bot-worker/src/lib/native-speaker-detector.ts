@@ -156,7 +156,7 @@ export class NativeSpeakerDetector extends EventEmitter {
 
         (window as any).__speakerObserver = observer;
       },
-      { platform: this.platform, selectors }
+      { platform: this.platform, selectors } as { platform: string; selectors: Record<string, string> }
     );
 
     // Collecter les events périodiquement
@@ -186,7 +186,7 @@ export class NativeSpeakerDetector extends EventEmitter {
       } catch (error) {
         // Page peut être fermée
         if (this.isRunning) {
-          logger.warn('Failed to collect speaker events:', error);
+          logger.warn('Failed to collect speaker events:', error as Error);
         }
       }
     }, 100); // Collecter toutes les 100ms
