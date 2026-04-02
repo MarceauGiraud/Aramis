@@ -38,10 +38,7 @@ function validatePath(localPath: string): void {
 /**
  * Upload a recording to S3 using streams for memory efficiency
  */
-export async function uploadRecording(
-  localPath: string,
-  meetingId: string
-): Promise<string> {
+export async function uploadRecording(localPath: string, meetingId: string): Promise<string> {
   // Validate path to prevent path traversal
   validatePath(localPath);
 
@@ -94,10 +91,7 @@ export async function getPresignedUrl(key: string): Promise<string> {
 /**
  * Upload audio to S3 using streams for memory efficiency
  */
-export async function uploadAudio(
-  localPath: string,
-  meetingId: string
-): Promise<string> {
+export async function uploadAudio(localPath: string, meetingId: string): Promise<string> {
   // Validate path to prevent path traversal
   validatePath(localPath);
 

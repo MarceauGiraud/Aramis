@@ -28,10 +28,7 @@ export async function GET(request: NextRequest) {
       whereClause.scheduledStart = { gte: now };
       whereClause.status = { in: ['SCHEDULED', 'JOINING', 'WAITING', 'RECORDING'] };
     } else if (filter === 'past') {
-      whereClause.OR = [
-        { scheduledStart: { lt: now } },
-        { status: { in: ['COMPLETED', 'FAILED', 'CANCELLED'] } },
-      ];
+      whereClause.OR = [{ scheduledStart: { lt: now } }, { status: { in: ['COMPLETED', 'FAILED', 'CANCELLED'] } }];
     }
 
     const [meetings, total] = await Promise.all([
@@ -39,12 +36,10 @@ export async function GET(request: NextRequest) {
         where: whereClause,
         skip,
         take: limit,
-        orderBy: filter === 'upcoming'
-          ? { scheduledStart: 'asc' }
-          : { scheduledStart: 'desc' },
+        orderBy: filter === 'upcoming' ? { scheduledStart: 'asc' } : { scheduledStart: 'desc' },
         include: {
           recording: true,
-          transcript: true,
+          transcripts: true,
           summary: true,
           calendarEvent: {
             include: {
@@ -62,7 +57,7 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Add recordingEnabled field based on status
-    const meetingsWithRecordingFlag = meetings.map(m => ({
+    const meetingsWithRecordingFlag = meetings.map((m) => ({
       ...m,
       recordingEnabled: m.status !== 'CANCELLED' && m.status !== 'FAILED',
     }));
@@ -78,10 +73,7 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Error fetching meetings:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch meetings' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch meetings' }, { status: 500 });
   }
 }
 
@@ -92,28 +84,19 @@ export async function POST(request: NextRequest) {
     const validation = createMeetingSchema.safeParse(body);
 
     if (!validation.success) {
-      return NextResponse.json(
-        { error: 'Invalid request', details: validation.error.errors },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Invalid request', details: validation.error.errors }, { status: 400 });
     }
 
     const { title, meetingUrl, scheduledAt } = validation.data;
 
     // Validate meeting URL and detect platform
     if (!isValidMeetingUrl(meetingUrl)) {
-      return NextResponse.json(
-        { error: 'Invalid meeting URL. Supported: Zoom, Teams, Google Meet' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Invalid meeting URL. Supported: Zoom, Teams, Google Meet' }, { status: 400 });
     }
 
     const platform = detectPlatform(meetingUrl);
     if (!platform) {
-      return NextResponse.json(
-        { error: 'Could not detect meeting platform' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Could not detect meeting platform' }, { status: 400 });
     }
 
     // Create meeting record
@@ -149,9 +132,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(meeting, { status: 201 });
   } catch (error) {
     console.error('Error creating meeting:', error);
-    return NextResponse.json(
-      { error: 'Failed to create meeting' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create meeting' }, { status: 500 });
   }
 }

@@ -27,10 +27,7 @@ export interface ProviderConfig {
  * @returns A TranscriptionProvider instance
  * @throws Error if the provider is unknown or required API key is missing
  */
-export function createTranscriptionProvider(
-  name: string,
-  config?: ProviderConfig
-): TranscriptionProvider {
+export function createTranscriptionProvider(name: string, config?: ProviderConfig): TranscriptionProvider {
   switch (name) {
     case TRANSCRIPTION_PROVIDERS.DEEPGRAM: {
       const apiKey = config?.apiKey || process.env.DEEPGRAM_API_KEY;
@@ -94,6 +91,6 @@ export function getDefaultProvider(): TranscriptionProvider {
   }
 
   throw new Error(
-    'No transcription provider API key found. Set one of: DEEPGRAM_API_KEY, ASSEMBLYAI_API_KEY, OPENAI_API_KEY'
+    'No transcription provider API key found. Set one of: DEEPGRAM_API_KEY, ASSEMBLYAI_API_KEY, OPENAI_API_KEY',
   );
 }

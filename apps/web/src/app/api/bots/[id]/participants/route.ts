@@ -3,10 +3,7 @@ import { prisma } from '@aramis/database';
 import { apiError } from '@/lib/api-helpers';
 
 // GET /api/bots/:id/participants - list participants
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },

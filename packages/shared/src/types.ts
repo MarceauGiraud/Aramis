@@ -186,6 +186,27 @@ export interface WebhookPayload {
   data: Record<string, unknown>;
 }
 
+// Bot error classification
+export type BotErrorType =
+  | 'denied_entry'
+  | 'timeout'
+  | 'network_error'
+  | 'kicked'
+  | 'meeting_ended'
+  | 'login_required'
+  | 'display_error'
+  | 'recording_error'
+  | 'unknown';
+
+// Bot command (sent via Redis pub/sub)
+export type BotCommandType = 'pause' | 'resume' | 'leave' | 'send_chat' | 'output_audio';
+
+export interface BotCommand {
+  action: BotCommandType;
+  meetingId: string;
+  data?: Record<string, unknown>;
+}
+
 // Chat message
 export interface ChatMessageData {
   sender: string;

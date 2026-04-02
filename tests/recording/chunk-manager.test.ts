@@ -161,7 +161,7 @@ describe('Chunk Manager', () => {
       await chunkManager.startRecording();
 
       // Wait a small amount to ensure timing difference
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const chunk = await chunkManager.finalizeChunk();
 
@@ -230,9 +230,7 @@ describe('Chunk Merging', () => {
   });
 
   it('should fail when no chunks provided', async () => {
-    await expect(
-      mockMergeChunks({ chunks: [], outputPath: '/tmp' })
-    ).rejects.toThrow('No chunks to merge');
+    await expect(mockMergeChunks({ chunks: [], outputPath: '/tmp' })).rejects.toThrow('No chunks to merge');
   });
 
   it('should maintain chronological order', async () => {
@@ -282,7 +280,7 @@ describe('Chunk Storage', () => {
           return true;
         } catch {
           if (i === maxRetries - 1) throw new Error('Max retries exceeded');
-          await new Promise(r => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 100));
         }
       }
       return false;

@@ -2,15 +2,13 @@ import {
   S3Client,
   HeadBucketCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 function getS3Client(): S3Client | null {
-  if (
-    !process.env.S3_ENDPOINT ||
-    !process.env.S3_ACCESS_KEY ||
-    !process.env.S3_SECRET_KEY
-  ) {
+  if (!process.env.S3_ENDPOINT || !process.env.S3_ACCESS_KEY || !process.env.S3_SECRET_KEY) {
     return null;
   }
   return new S3Client({
@@ -56,15 +54,13 @@ export async function deleteS3Prefix(prefix: string): Promise<number> {
         Bucket: BUCKET,
         Prefix: prefix,
         ContinuationToken: continuationToken,
-      })
+      }),
     );
 
     if (list.Contents) {
       for (const obj of list.Contents) {
         if (obj.Key) {
-          await client.send(
-            new DeleteObjectCommand({ Bucket: BUCKET, Key: obj.Key })
-          );
+          await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: obj.Key }));
           deleted++;
         }
       }
@@ -74,6 +70,34 @@ export async function deleteS3Prefix(prefix: string): Promise<number> {
   } while (continuationToken);
 
   return deleted;
+}
+
+/**
+ * Convert an s3:// URL to an S3 object key.
+ * e.g., "s3://recordings/recordings/abc/file.webm" → "recordings/abc/file.webm"
+ */
+export function s3UrlToKey(s3Url: string): string | null {
+  if (!s3Url.startsWith('s3://')) return null;
+  // Format: s3://bucket/key
+  const withoutProtocol = s3Url.slice(5);
+  const slashIndex = withoutProtocol.indexOf('/');
+  if (slashIndex === -1) return null;
+  return withoutProtocol.slice(slashIndex + 1);
+}
+
+/**
+ * Generate a presigned HTTP URL for an S3 object.
+ * Accepts either an s3:// URL or a raw S3 key.
+ * Returns null if S3 is not configured.
+ */
+export async function getPresignedUrl(s3UrlOrKey: string, expiresIn = 3600): Promise<string | null> {
+  const client = getS3Client();
+  if (!client) return null;
+
+  const key = s3UrlOrKey.startsWith('s3://') ? s3UrlToKey(s3UrlOrKey) : s3UrlOrKey;
+  if (!key) return null;
+
+  return getSignedUrl(client, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn });
 }
 
 /**

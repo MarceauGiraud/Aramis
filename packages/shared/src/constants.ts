@@ -22,9 +22,13 @@ export const JOB_TYPES = {
 // Meeting URL patterns
 export const MEETING_URL_PATTERNS = {
   ZOOM: /https?:\/\/([\w-]+\.)?zoom\.us\/(j|my)\/[\w-]+/i,
-  TEAMS: /https?:\/\/teams\.microsoft\.com\/l\/meetup-join\/.+/i,
+  TEAMS: /https?:\/\/teams\.(microsoft\.com|live\.com)\/(l\/meetup-join|meet|v2\/#\/l\/meetup-join)\/.+/i,
   GOOGLE_MEET: /https?:\/\/meet\.google\.com\/[\w-]+/i,
 } as const;
+
+// Standalone re-exports for convenience (also available via BOT_CONFIG)
+export const SILENCE_TIMEOUT_MS = 10 * 60 * 1000;
+export const CHAT_POLL_INTERVAL_MS = 2000;
 
 // Bot configuration
 export const BOT_CONFIG = {
@@ -36,12 +40,30 @@ export const BOT_CONFIG = {
   POPUP_STABLE_MS: 2000,
   ADMISSION_TIMEOUT_MS: 5 * 60 * 1000,
   RECORDING_CHECK_INTERVAL_MS: 5000,
-  MAX_RECORDING_DURATION_MS: 4 * 60 * 60 * 1000,
+  MAX_RECORDING_DURATION_MS: 3.5 * 60 * 60 * 1000, // 3.5h hard limit — recording rotates every 3h, this is the safety cutoff
   HEARTBEAT_INTERVAL_MS: 30000,
   SILENCE_TIMEOUT_MS: 10 * 60 * 1000, // 10 min silence = auto-leave
   CHAT_POLL_INTERVAL_MS: 2000,
   SPEAKER_TRACKING_INTERVAL_MS: 500,
 } as const;
+
+// Known bot name keywords (for auto-leave when only bots remain)
+export const DEFAULT_BOT_KEYWORDS = [
+  'otter',
+  'fireflies',
+  'tl;dv',
+  'grain',
+  'fathom',
+  'read.ai',
+  'chorus',
+  'gong',
+  'avoma',
+  'recorder',
+  'notetaker',
+  'note taker',
+  'meeting bot',
+  'attendee',
+] as const;
 
 // Supported formats
 export const SUPPORTED_FORMATS = {

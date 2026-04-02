@@ -58,6 +58,9 @@ const DEFAULT_OPTIONS: Required<ChunkUploaderOptions> = {
   contentType: 'video/webm',
 };
 
+/** Maximum size per upload part to stay under Supabase Storage 50MB limit */
+const MAX_CHUNK_SIZE = 40 * 1024 * 1024; // 40MB
+
 // Allowed upload directory to prevent path traversal
 const ALLOWED_UPLOAD_DIR = '/tmp/recordings';
 
@@ -93,7 +96,9 @@ export class ChunkUploader {
 
   constructor(options: ChunkUploaderOptions = {}) {
     if (!isS3Configured()) {
-      throw new Error('S3 is not configured. Please set S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, and S3_BUCKET environment variables.');
+      throw new Error(
+        'S3 is not configured. Please set S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, and S3_BUCKET environment variables.',
+      );
     }
 
     const config = validateS3Config();
@@ -130,11 +135,7 @@ export class ChunkUploader {
    * @param meetingId Meeting ID for organizing in S3
    * @param existingState Optional state to resume from a previous upload
    */
-  async start(
-    filePath: string,
-    meetingId: string,
-    existingState?: UploadState
-  ): Promise<void> {
+  async start(filePath: string, meetingId: string, existingState?: UploadState): Promise<void> {
     this.validatePath(filePath);
 
     this.filePath = filePath;
@@ -205,10 +206,8 @@ export class ChunkUploader {
       const remoteParts = response.Parts || [];
 
       // Verify our tracked parts match what's on S3
-      const remotePartNumbers = new Set(remoteParts.map(p => p.PartNumber));
-      const validParts = this.uploadedParts.filter(p =>
-        remotePartNumbers.has(p.partNumber)
-      );
+      const remotePartNumbers = new Set(remoteParts.map((p) => p.PartNumber));
+      const validParts = this.uploadedParts.filter((p) => remotePartNumbers.has(p.partNumber));
 
       if (validParts.length !== this.uploadedParts.length) {
         logger.warn('Some parts were not found on S3, adjusting state', {
@@ -289,9 +288,10 @@ export class ChunkUploader {
       fs.readSync(fd, buffer, 0, newDataSize, this.lastUploadedPosition);
       fs.closeSync(fd);
 
-      // Upload the chunk with retries
-      await this.uploadChunkWithRetry(buffer);
-
+      // Split into multiple parts if the data exceeds MAX_CHUNK_SIZE
+      // This prevents "object exceeded maximum allowed size" errors on
+      // Supabase Storage (50MB limit) when uploads fall behind.
+      await this.uploadBufferInParts(buffer);
     } catch (error) {
       logger.error('Error uploading pending data', {
         error: error instanceof Error ? error.message : String(error),
@@ -358,6 +358,31 @@ export class ChunkUploader {
   }
 
   /**
+   * Upload a buffer, splitting it into multiple parts if it exceeds MAX_CHUNK_SIZE.
+   * This prevents "object exceeded maximum allowed size" errors when data
+   * accumulates due to failed uploads or slow network.
+   */
+  private async uploadBufferInParts(buffer: Buffer): Promise<void> {
+    if (buffer.length <= MAX_CHUNK_SIZE) {
+      await this.uploadChunkWithRetry(buffer);
+      return;
+    }
+
+    const totalParts = Math.ceil(buffer.length / MAX_CHUNK_SIZE);
+    logger.info(`Splitting oversized chunk into ${totalParts} parts`, {
+      totalSize: buffer.length,
+      maxChunkSize: MAX_CHUNK_SIZE,
+    });
+
+    for (let i = 0; i < totalParts; i++) {
+      const start = i * MAX_CHUNK_SIZE;
+      const end = Math.min(start + MAX_CHUNK_SIZE, buffer.length);
+      const part = buffer.subarray(start, end);
+      await this.uploadChunkWithRetry(part);
+    }
+  }
+
+  /**
    * Stop uploading and complete the multipart upload
    * @returns The S3 URL of the completed upload
    */
@@ -383,7 +408,7 @@ export class ChunkUploader {
         fs.closeSync(fd);
 
         try {
-          await this.uploadChunkWithRetry(buffer);
+          await this.uploadBufferInParts(buffer);
         } catch (error) {
           logger.error('Failed to upload final chunk', {
             error: error instanceof Error ? error.message : String(error),
@@ -420,7 +445,7 @@ export class ChunkUploader {
     // Sort parts by part number (required by S3)
     const sortedParts: CompletedPart[] = this.uploadedParts
       .sort((a, b) => a.partNumber - b.partNumber)
-      .map(p => ({
+      .map((p) => ({
         PartNumber: p.partNumber,
         ETag: p.etag,
       }));
@@ -547,7 +572,7 @@ export class ChunkUploader {
    * Helper to sleep for a given number of milliseconds
    */
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 

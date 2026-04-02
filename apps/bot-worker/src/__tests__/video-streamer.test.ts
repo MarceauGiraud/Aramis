@@ -93,7 +93,7 @@ async function runTests() {
     } catch (error) {
       assert(
         error instanceof Error && error.message.includes('No recording in progress'),
-        'Should throw correct error message'
+        'Should throw correct error message',
       );
     }
   });
@@ -113,7 +113,7 @@ async function runTests() {
     } catch (error) {
       assert(
         error instanceof Error && error.message.includes('already in progress'),
-        'Should throw correct error message'
+        'Should throw correct error message',
       );
     }
   });

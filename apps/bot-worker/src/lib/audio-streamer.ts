@@ -99,7 +99,7 @@ export class AudioStreamer {
       // Create a null sink for capturing audio
       // The monitor source of this sink will capture all audio routed to it
       this.runCommand(
-        `pactl load-module module-null-sink sink_name=${this.config.sinkName} sink_properties=device.description="Aramis_Audio_Capture"`
+        `pactl load-module module-null-sink sink_name=${this.config.sinkName} sink_properties=device.description="Aramis_Audio_Capture"`,
       );
       logger.info(`Created PulseAudio null sink: ${this.config.sinkName}`);
 
@@ -237,27 +237,30 @@ export class AudioStreamer {
       '-y',
 
       // Input: PulseAudio monitor source
-      '-f', 'pulse',
-      '-i', `${this.config.sinkName}.monitor`,
+      '-f',
+      'pulse',
+      '-i',
+      `${this.config.sinkName}.monitor`,
 
       // Audio settings
-      '-ac', this.config.channels.toString(),
-      '-ar', this.config.sampleRate.toString(),
+      '-ac',
+      this.config.channels.toString(),
+      '-ar',
+      this.config.sampleRate.toString(),
     ];
 
     if (this.config.format === 'wav') {
       // WAV format - best for transcription
       args.push(
-        '-acodec', 'pcm_s16le',
+        '-acodec',
+        'pcm_s16le',
         // Flush output frequently for real-time writing
-        '-flush_packets', '1'
+        '-flush_packets',
+        '1',
       );
     } else {
       // AAC format - smaller file size
-      args.push(
-        '-acodec', 'aac',
-        '-b:a', '128k'
-      );
+      args.push('-acodec', 'aac', '-b:a', '128k');
     }
 
     // Output file
@@ -415,7 +418,7 @@ export class AudioStreamer {
 
     try {
       const output = this.runCommand(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}"`
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}"`,
       );
       return parseFloat(output) || 0;
     } catch (error) {

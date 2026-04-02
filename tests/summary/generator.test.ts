@@ -74,10 +74,7 @@ class MockSummaryGenerator {
     this.mockLLMCall.mockRejectedValue(error);
   }
 
-  async generateSummary(
-    transcript: TranscriptInput,
-    context: MeetingContext
-  ): Promise<MeetingSummary> {
+  async generateSummary(transcript: TranscriptInput, context: MeetingContext): Promise<MeetingSummary> {
     return this.mockLLMCall(transcript, context);
   }
 
@@ -101,9 +98,7 @@ describe('Summary Generator', () => {
           { topic: 'Budget', summary: 'Approved $100k for marketing' },
           { topic: 'Timeline', summary: 'Launch date set for March 1st' },
         ],
-        decisions: [
-          { description: 'Hire 2 new engineers', madeBy: 'John' },
-        ],
+        decisions: [{ description: 'Hire 2 new engineers', madeBy: 'John' }],
         actionItems: [
           {
             description: 'Draft hiring plan',
@@ -129,7 +124,7 @@ describe('Summary Generator', () => {
           date: '2026-01-15',
           participants: ['John', 'Jane'],
           platform: 'ZOOM',
-        }
+        },
       );
 
       expect(result.overview).toBe(mockSummary.overview);
@@ -153,7 +148,7 @@ describe('Summary Generator', () => {
           date: '2026-01-15',
           participants: [],
           platform: 'TEAMS',
-        }
+        },
       );
 
       expect(result.keyPoints).toHaveLength(0);
@@ -186,7 +181,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'Alice will create the project plan...', duration: 1800, speakers: ['Alice', 'Bob'] },
-        { title: 'Planning', date: '2026-01-15', participants: ['Alice', 'Bob'], platform: 'GOOGLE_MEET' }
+        { title: 'Planning', date: '2026-01-15', participants: ['Alice', 'Bob'], platform: 'GOOGLE_MEET' },
       );
 
       expect(result.actionItems).toHaveLength(2);
@@ -211,7 +206,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'We need to update the docs...', duration: 900, speakers: [] },
-        { title: 'Team Sync', date: '2026-01-15', participants: [], platform: 'ZOOM' }
+        { title: 'Team Sync', date: '2026-01-15', participants: [], platform: 'ZOOM' },
       );
 
       expect(result.actionItems[0].assignee).toBe('Unassigned');
@@ -238,7 +233,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'This is critical, we need to fix the bug ASAP...', duration: 600, speakers: [] },
-        { title: 'Bug Review', date: '2026-01-15', participants: [], platform: 'TEAMS' }
+        { title: 'Bug Review', date: '2026-01-15', participants: [], platform: 'TEAMS' },
       );
 
       expect(result.actionItems[0].priority).toBe('high');
@@ -260,8 +255,8 @@ describe('Summary Generator', () => {
       });
 
       const result = await generator.generateSummary(
-        { fullText: 'Let\'s discuss the roadmap...', duration: 2700, speakers: ['PM', 'Engineer'] },
-        { title: 'Roadmap Planning', date: '2026-01-15', participants: ['PM', 'Engineer'], platform: 'ZOOM' }
+        { fullText: "Let's discuss the roadmap...", duration: 2700, speakers: ['PM', 'Engineer'] },
+        { title: 'Roadmap Planning', date: '2026-01-15', participants: ['PM', 'Engineer'], platform: 'ZOOM' },
       );
 
       expect(result.keyPoints).toHaveLength(3);
@@ -282,7 +277,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'Standup transcript...', duration: 900, speakers: [] },
-        { title: 'Daily Standup', date: '2026-01-15', participants: [], platform: 'GOOGLE_MEET' }
+        { title: 'Daily Standup', date: '2026-01-15', participants: [], platform: 'GOOGLE_MEET' },
       );
 
       expect(result.keyPoints[0].timestamp).toBe(120);
@@ -312,7 +307,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'We decided to use React...', duration: 3600, speakers: ['Tech Lead', 'CTO'] },
-        { title: 'Tech Stack Decision', date: '2026-01-15', participants: ['Tech Lead', 'CTO'], platform: 'TEAMS' }
+        { title: 'Tech Stack Decision', date: '2026-01-15', participants: ['Tech Lead', 'CTO'], platform: 'TEAMS' },
       );
 
       expect(result.decisions).toHaveLength(2);
@@ -328,8 +323,8 @@ describe('Summary Generator', () => {
       await expect(
         generator.generateSummary(
           { fullText: 'Test', duration: 100, speakers: [] },
-          { title: 'Test', date: '2026-01-15', participants: [], platform: 'ZOOM' }
-        )
+          { title: 'Test', date: '2026-01-15', participants: [], platform: 'ZOOM' },
+        ),
       ).rejects.toThrow('Rate limit exceeded');
     });
 
@@ -350,7 +345,7 @@ describe('Summary Generator', () => {
 
       const result = await generator.generateSummary(
         { fullText: 'Quick sync', duration: 300, speakers: [] },
-        { title: 'Quick Sync', date: '2026-01-15', participants: [], platform: 'ZOOM' }
+        { title: 'Quick Sync', date: '2026-01-15', participants: [], platform: 'ZOOM' },
       );
 
       expect(result.nextSteps).toBeUndefined();
@@ -422,9 +417,7 @@ describe('Summary Validation', () => {
       overview: 'Valid overview text here.',
       keyPoints: [],
       decisions: [],
-      actionItems: [
-        { description: '', priority: 'high', status: 'pending' },
-      ],
+      actionItems: [{ description: '', priority: 'high', status: 'pending' }],
     };
 
     const result = validateSummary(invalidSummary);

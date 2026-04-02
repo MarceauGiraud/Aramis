@@ -5,18 +5,17 @@ import { prisma } from '@aramis/database';
 import { BOT_COMMANDS_CHANNEL, BOT_COMMAND_TYPES } from '@aramis/shared';
 import { apiError, validateBody, parseJsonBody } from '@/lib/api-helpers';
 
-const outputAudioSchema = z.object({
-  audioUrl: z.string().url().optional(),
-  text: z.string().max(10000).optional(),
-}).refine((data) => data.audioUrl || data.text, {
-  message: 'Either audioUrl or text must be provided',
-});
+const outputAudioSchema = z
+  .object({
+    audioUrl: z.string().url().optional(),
+    text: z.string().max(10000).optional(),
+  })
+  .refine((data) => data.audioUrl || data.text, {
+    message: 'Either audioUrl or text must be provided',
+  });
 
 // POST /api/bots/:id/output-audio - play audio in meeting
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
@@ -27,10 +26,7 @@ export async function POST(
       return apiError('NOT_FOUND', 'Bot not found', 404);
     }
 
-    if (
-      !meeting.botSession ||
-      meeting.botSession.status !== 'RUNNING'
-    ) {
+    if (!meeting.botSession || meeting.botSession.status !== 'RUNNING') {
       return apiError('BAD_REQUEST', 'Bot is not currently active', 400);
     }
 
@@ -48,7 +44,7 @@ export async function POST(
           type: BOT_COMMAND_TYPES.OUTPUT_AUDIO,
           meetingId: params.id,
           data: validation.data,
-        })
+        }),
       );
     } finally {
       await redis.quit();

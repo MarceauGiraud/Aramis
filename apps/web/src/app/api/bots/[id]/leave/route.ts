@@ -5,10 +5,7 @@ import { BOT_COMMANDS_CHANNEL, BOT_COMMAND_TYPES } from '@aramis/shared';
 import { apiError } from '@/lib/api-helpers';
 
 // POST /api/bots/:id/leave - force the bot to leave
-export async function POST(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
@@ -19,10 +16,7 @@ export async function POST(
       return apiError('NOT_FOUND', 'Bot not found', 404);
     }
 
-    if (
-      !meeting.botSession ||
-      (meeting.botSession.status !== 'RUNNING' && meeting.botSession.status !== 'STARTING')
-    ) {
+    if (!meeting.botSession || (meeting.botSession.status !== 'RUNNING' && meeting.botSession.status !== 'STARTING')) {
       return apiError('BAD_REQUEST', 'Bot is not currently active', 400);
     }
 
@@ -33,7 +27,7 @@ export async function POST(
         JSON.stringify({
           type: BOT_COMMAND_TYPES.LEAVE,
           meetingId: params.id,
-        })
+        }),
       );
     } finally {
       await redis.quit();

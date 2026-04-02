@@ -16,10 +16,7 @@ async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
 }
 
 // POST /api/calendars/:id/sync - Trigger manual sync
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -36,10 +33,7 @@ export async function POST(
     }
 
     if (!connection.isActive) {
-      return NextResponse.json(
-        { error: 'Connection is not active' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Connection is not active' }, { status: 400 });
     }
 
     // Queue a calendar sync job
@@ -50,12 +44,16 @@ export async function POST(
     try {
       const queue = new Queue(QUEUE_NAMES.CALENDAR_SYNC, { connection: redis });
 
-      await queue.add('manual-sync', {
-        connectionId: params.id,
-      }, {
-        removeOnComplete: 10,
-        removeOnFail: 50,
-      });
+      await queue.add(
+        'manual-sync',
+        {
+          connectionId: params.id,
+        },
+        {
+          removeOnComplete: 10,
+          removeOnFail: 50,
+        },
+      );
 
       await queue.close();
     } finally {
@@ -68,9 +66,6 @@ export async function POST(
     });
   } catch (error) {
     console.error('Error triggering calendar sync:', error);
-    return NextResponse.json(
-      { error: 'Failed to trigger calendar sync' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to trigger calendar sync' }, { status: 500 });
   }
 }

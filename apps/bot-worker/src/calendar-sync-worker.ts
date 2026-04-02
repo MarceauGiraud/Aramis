@@ -60,11 +60,7 @@ export function createCalendarSyncWorker(redis: IORedis) {
 
               // Auto-create meetings for autoRecord calendars
               if (calendar.autoRecord) {
-                const created = await autoCreateMeetings(
-                  calendar.id,
-                  connection.userId,
-                  meetingQueue
-                );
+                const created = await autoCreateMeetings(calendar.id, connection.userId, meetingQueue);
                 meetingsCreated += created;
               }
             }
@@ -86,9 +82,7 @@ export function createCalendarSyncWorker(redis: IORedis) {
           }
         }
 
-        logger.info(
-          `Calendar sync complete: ${totalSynced} events synced, ${meetingsCreated} meetings created`
-        );
+        logger.info(`Calendar sync complete: ${totalSynced} events synced, ${meetingsCreated} meetings created`);
 
         return { totalSynced, meetingsCreated };
       } catch (error) {
@@ -99,7 +93,7 @@ export function createCalendarSyncWorker(redis: IORedis) {
     {
       connection: redis,
       concurrency: 1, // Only one sync at a time
-    }
+    },
   );
 
   worker.on('completed', (job) => {
@@ -155,11 +149,7 @@ async function syncCalendarEvents(calendarId: string, connectionId: string): Pro
  * - Don't already have an associated meeting (via calendarEventId)
  * - Are in the future (within the next 7 days)
  */
-async function autoCreateMeetings(
-  calendarId: string,
-  userId: string,
-  meetingQueue: Queue
-): Promise<number> {
+async function autoCreateMeetings(calendarId: string, userId: string, meetingQueue: Queue): Promise<number> {
   const now = new Date();
   const oneWeekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
@@ -211,19 +201,23 @@ async function autoCreateMeetings(
       // Queue the bot to join at the scheduled time
       const delay = Math.max(0, event.startTime.getTime() - Date.now());
 
-      await meetingQueue.add('join', {
-        meetingId: meeting.id,
-        meetingUrl: event.meetingUrl,
-        platform: event.platform,
-      }, {
-        delay,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 10000 },
-      });
+      await meetingQueue.add(
+        'join',
+        {
+          meetingId: meeting.id,
+          meetingUrl: event.meetingUrl,
+          platform: event.platform,
+        },
+        {
+          delay,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 10000 },
+        },
+      );
 
       logger.info(
         `Auto-created meeting for calendar event: ${event.title} (${meeting.id}), ` +
-        `scheduled in ${Math.round(delay / 60000)} minutes`
+          `scheduled in ${Math.round(delay / 60000)} minutes`,
       );
 
       created++;
@@ -242,13 +236,17 @@ export async function setupCalendarSyncRepeatable(redis: IORedis): Promise<void>
   const queue = new Queue(QUEUE_NAMES.CALENDAR_SYNC, { connection: redis });
 
   // Add repeatable job every 5 minutes
-  await queue.add('sync', {}, {
-    repeat: {
-      every: 5 * 60 * 1000, // 5 minutes
+  await queue.add(
+    'sync',
+    {},
+    {
+      repeat: {
+        every: 5 * 60 * 1000, // 5 minutes
+      },
+      removeOnComplete: 10,
+      removeOnFail: 50,
     },
-    removeOnComplete: 10,
-    removeOnFail: 50,
-  });
+  );
 
   logger.info('Calendar sync repeatable job configured (every 5 minutes)');
 }

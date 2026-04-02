@@ -35,7 +35,7 @@ export async function deductCredits(
   userId: string,
   amount: number,
   description: string,
-  referenceId?: string
+  referenceId?: string,
 ): Promise<boolean> {
   if (!isBillingEnabled()) return true;
   if (!('creditBalance' in prisma) || !('creditTransaction' in prisma)) return true;
@@ -78,12 +78,7 @@ export async function deductCredits(
  * Add credits to a user's balance.
  * No-op if billing is not enabled.
  */
-export async function addCredits(
-  userId: string,
-  amount: number,
-  type: string,
-  description: string
-): Promise<boolean> {
+export async function addCredits(userId: string, amount: number, type: string, description: string): Promise<boolean> {
   if (!isBillingEnabled()) return true;
   if (!('creditBalance' in prisma) || !('creditTransaction' in prisma)) return true;
 

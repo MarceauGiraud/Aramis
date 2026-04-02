@@ -19,7 +19,7 @@ export function apiError(
   code: string,
   message: string,
   status: number,
-  details?: unknown
+  details?: unknown,
 ): NextResponse<ApiErrorResponse> {
   return NextResponse.json(
     {
@@ -29,7 +29,7 @@ export function apiError(
         ...(details !== undefined ? { details } : {}),
       },
     },
-    { status }
+    { status },
   );
 }
 
@@ -68,7 +68,7 @@ export function paginatedResponse<T>(
   data: T[],
   total: number,
   page: number,
-  limit: number
+  limit: number,
 ): NextResponse<PaginatedResponse<T>> {
   const totalPages = Math.ceil(total / limit);
   return NextResponse.json({
@@ -89,7 +89,7 @@ export function paginatedResponse<T>(
  */
 export async function validateBody<T>(
   schema: ZodSchema<T>,
-  body: unknown
+  body: unknown,
 ): Promise<{ data: T } | { error: NextResponse<ApiErrorResponse> }> {
   const result = schema.safeParse(body);
   if (!result.success) {
@@ -108,7 +108,7 @@ export async function validateBody<T>(
  * Parse JSON body from request, returning error response if invalid
  */
 export async function parseJsonBody(
-  request: Request
+  request: Request,
 ): Promise<{ data: unknown } | { error: NextResponse<ApiErrorResponse> }> {
   try {
     const data = await request.json();

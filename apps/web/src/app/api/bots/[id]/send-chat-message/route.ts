@@ -11,10 +11,7 @@ const sendChatSchema = z.object({
 });
 
 // POST /api/bots/:id/send-chat-message - send chat message in meeting
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
@@ -25,10 +22,7 @@ export async function POST(
       return apiError('NOT_FOUND', 'Bot not found', 404);
     }
 
-    if (
-      !meeting.botSession ||
-      meeting.botSession.status !== 'RUNNING'
-    ) {
+    if (!meeting.botSession || meeting.botSession.status !== 'RUNNING') {
       return apiError('BAD_REQUEST', 'Bot is not currently active', 400);
     }
 
@@ -48,7 +42,7 @@ export async function POST(
           type: BOT_COMMAND_TYPES.SEND_CHAT,
           meetingId: params.id,
           data: { message },
-        })
+        }),
       );
     } finally {
       await redis.quit();

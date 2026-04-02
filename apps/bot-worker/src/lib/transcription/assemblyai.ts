@@ -50,12 +50,13 @@ export class AssemblyAITranscriptionProvider implements TranscriptionProvider {
     if (this.client) return this.client;
 
     try {
+      // @ts-ignore - assemblyai is an optional dependency
       const assemblyai = await import('assemblyai');
       this.client = new assemblyai.AssemblyAI({ apiKey: this.config.apiKey });
       return this.client;
     } catch (error) {
       throw new Error(
-        'AssemblyAI SDK is not installed. Install it with: pnpm --filter @aramis/bot-worker add assemblyai'
+        'AssemblyAI SDK is not installed. Install it with: pnpm --filter @aramis/bot-worker add assemblyai',
       );
     }
   }
@@ -244,12 +245,14 @@ export class AssemblyAITranscriptionProvider implements TranscriptionProvider {
             endTime: (word.end || 0) / 1000,
             confidence: word.confidence,
             speaker,
-            words: [{
-              text: word.text,
-              startTime: (word.start || 0) / 1000,
-              endTime: (word.end || 0) / 1000,
-              confidence: word.confidence,
-            }],
+            words: [
+              {
+                text: word.text,
+                startTime: (word.start || 0) / 1000,
+                endTime: (word.end || 0) / 1000,
+                confidence: word.confidence,
+              },
+            ],
           };
         } else {
           currentSegment.text += ' ' + word.text;
@@ -273,13 +276,11 @@ export class AssemblyAITranscriptionProvider implements TranscriptionProvider {
       speakers: Array.from(speakerSet),
       language: transcript.language_code,
       duration: transcript.audio_duration,
-      fullText: transcript.text || segments.map(s => s.text).join(' '),
+      fullText: transcript.text || segments.map((s) => s.text).join(' '),
     };
   }
 }
 
-export function createAssemblyAIProvider(
-  config?: Partial<AssemblyAIConfig>
-): AssemblyAITranscriptionProvider {
+export function createAssemblyAIProvider(config?: Partial<AssemblyAIConfig>): AssemblyAITranscriptionProvider {
   return new AssemblyAITranscriptionProvider(config);
 }

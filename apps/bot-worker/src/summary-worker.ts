@@ -3,6 +3,7 @@ import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { QUEUE_NAMES } from '@aramis/shared';
 import { logger } from './lib/logger';
+import { stateMachine } from './lib/bot-state-machine';
 import {
   SummaryGenerator,
   createSummaryGenerator,
@@ -66,8 +67,17 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
     throw new Error(`Transcript not found: ${transcriptId}`);
   }
 
-  if (transcript.status !== 'COMPLETED' || !transcript.fullText) {
+  if (transcript.status !== 'COMPLETED') {
     throw new Error(`Transcript ${transcriptId} is not ready (status: ${transcript.status})`);
+  }
+
+  if (!transcript.fullText || transcript.fullText.trim().length === 0) {
+    logger.warn(`Transcript ${transcriptId} has no content — skipping summary generation`);
+    // Still mark meeting as COMPLETED (summary is optional)
+    await stateMachine.transition(meetingId, 'COMPLETED', {
+      reason: 'Transcript has no content, skipping summary',
+    });
+    return;
   }
 
   // Create or update summary record in PROCESSING state
@@ -95,14 +105,12 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
 
   try {
     // Build transcript input for the generator
-    const totalDuration = transcript.segments.length > 0
-      ? transcript.segments[transcript.segments.length - 1].endTime -
-        transcript.segments[0].startTime
-      : (meeting.duration ?? 0);
+    const totalDuration =
+      transcript.segments.length > 0
+        ? transcript.segments[transcript.segments.length - 1].endTime - transcript.segments[0].startTime
+        : (meeting.duration ?? 0);
 
-    const speakerNames = transcript.speakers.map(
-      (s) => s.identifiedName || s.label,
-    );
+    const speakerNames = transcript.speakers.map((s) => s.identifiedName || s.label);
 
     const transcriptInput: TranscriptInput = {
       fullText: transcript.fullText,
@@ -122,14 +130,11 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
     // Generate summary
     const config = getSummaryConfig();
     const generator = createSummaryGenerator(config);
-    const summary: MeetingSummary = await generator.generateSummary(
-      transcriptInput,
-      meetingContext,
-    );
+    const summary: MeetingSummary = await generator.generateSummary(transcriptInput, meetingContext);
 
     logger.info(
       `Summary generated: ${summary.keyPoints.length} key points, ` +
-      `${summary.decisions.length} decisions, ${summary.actionItems.length} action items`,
+        `${summary.decisions.length} decisions, ${summary.actionItems.length} action items`,
     );
 
     // Save summary to database
@@ -143,15 +148,15 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
         actionItems: summary.actionItems as any,
         nextSteps: summary.nextSteps,
         rawResponse: summary as any,
-        modelUsed: config.model ?? (config.provider === 'anthropic' ? 'claude-3-sonnet-20240229' : 'gpt-4-turbo-preview'),
+        modelUsed:
+          config.model ?? (config.provider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-5.4-2026-03-05'),
         generatedAt: new Date(),
       },
     });
 
     // Update meeting status to COMPLETED now that everything is done
-    await prisma.meeting.update({
-      where: { id: meetingId },
-      data: { status: 'COMPLETED' },
+    await stateMachine.transition(meetingId, 'COMPLETED', {
+      reason: 'Summary generation completed',
     });
 
     logger.info(`Summary saved for meeting ${meetingId}`);
@@ -169,9 +174,8 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
     });
 
     // Still mark meeting as COMPLETED (transcription succeeded, summary is optional)
-    await prisma.meeting.update({
-      where: { id: meetingId },
-      data: { status: 'COMPLETED' },
+    await stateMachine.transition(meetingId, 'COMPLETED', {
+      reason: 'Summary failed but transcription succeeded',
     });
 
     throw error;

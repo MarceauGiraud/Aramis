@@ -109,11 +109,7 @@ describe('Meeting URL Detector', () => {
     });
 
     it('should return null when no meeting URL found', () => {
-      const texts = [
-        'No meeting link here',
-        'Check out https://google.com for more info',
-        '',
-      ];
+      const texts = ['No meeting link here', 'Check out https://google.com for more info', ''];
 
       for (const text of texts) {
         expect(extractMeetingUrl(text)).toBeNull();

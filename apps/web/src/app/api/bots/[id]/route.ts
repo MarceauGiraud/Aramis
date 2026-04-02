@@ -3,12 +3,7 @@ import { z } from 'zod';
 import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { BOT_COMMANDS_CHANNEL, BOT_COMMAND_TYPES } from '@aramis/shared';
-import {
-  apiError,
-  validateBody,
-  parseJsonBody,
-  getCurrentUserId,
-} from '@/lib/api-helpers';
+import { apiError, validateBody, parseJsonBody, getCurrentUserId } from '@/lib/api-helpers';
 import { sanitizeString } from '@/lib/sanitize';
 
 const updateBotSchema = z.object({
@@ -29,10 +24,7 @@ async function getMeeting(id: string) {
 }
 
 // GET /api/bots/:id - get bot status
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await getMeeting(params.id);
     if (!meeting) {
@@ -46,10 +38,7 @@ export async function GET(
 }
 
 // PATCH /api/bots/:id - update a bot
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await getMeeting(params.id);
     if (!meeting) {
@@ -75,10 +64,7 @@ export async function PATCH(
     });
 
     // If bot is running, publish update via Redis pub/sub
-    if (
-      meeting.botSession &&
-      (meeting.botSession.status === 'RUNNING' || meeting.botSession.status === 'STARTING')
-    ) {
+    if (meeting.botSession && (meeting.botSession.status === 'RUNNING' || meeting.botSession.status === 'STARTING')) {
       const redis = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379');
       try {
         await redis.publish(
@@ -87,7 +73,7 @@ export async function PATCH(
             type: BOT_COMMAND_TYPES.UPDATE_CONFIG,
             meetingId: params.id,
             data: { bot_name, metadata, recording_mode },
-          })
+          }),
         );
       } finally {
         await redis.quit();
@@ -102,10 +88,7 @@ export async function PATCH(
 }
 
 // DELETE /api/bots/:id - stop bot and clean up
-export async function DELETE(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await getMeeting(params.id);
     if (!meeting) {
@@ -113,10 +96,7 @@ export async function DELETE(
     }
 
     // If bot is running, send leave command
-    if (
-      meeting.botSession &&
-      (meeting.botSession.status === 'RUNNING' || meeting.botSession.status === 'STARTING')
-    ) {
+    if (meeting.botSession && (meeting.botSession.status === 'RUNNING' || meeting.botSession.status === 'STARTING')) {
       const redis = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379');
       try {
         await redis.publish(
@@ -124,7 +104,7 @@ export async function DELETE(
           JSON.stringify({
             type: BOT_COMMAND_TYPES.LEAVE,
             meetingId: params.id,
-          })
+          }),
         );
       } finally {
         await redis.quit();

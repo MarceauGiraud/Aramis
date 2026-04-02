@@ -53,7 +53,7 @@ export class TemplateProcessor {
   async processTemplate(
     template: SummaryTemplate,
     transcript: TranscriptInput,
-    context: MeetingContext
+    context: MeetingContext,
   ): Promise<ProcessedSummary> {
     logger.info(`Processing template: ${template.name}`);
 
@@ -114,7 +114,7 @@ export class TemplateProcessor {
   private async processSection(
     section: TemplateSection,
     transcript: TranscriptInput,
-    context: MeetingContext
+    context: MeetingContext,
   ): Promise<string | string[] | object> {
     const prompt = this.buildSectionPrompt(section, transcript, context);
 
@@ -127,11 +127,7 @@ export class TemplateProcessor {
   /**
    * Build prompt for a section
    */
-  private buildSectionPrompt(
-    section: TemplateSection,
-    transcript: TranscriptInput,
-    context: MeetingContext
-  ): string {
+  private buildSectionPrompt(section: TemplateSection, transcript: TranscriptInput, context: MeetingContext): string {
     let resolvedPrompt = this.resolveVariables(section.prompt, transcript, context);
 
     const formatInstructions = this.getFormatInstructions(section);
@@ -159,11 +155,7 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
   /**
    * Resolve template variables
    */
-  resolveVariables(
-    text: string,
-    transcript: TranscriptInput,
-    context: MeetingContext
-  ): string {
+  resolveVariables(text: string, transcript: TranscriptInput, context: MeetingContext): string {
     const duration = this.formatDuration(transcript.duration);
 
     const variables: Record<string, string> = {
@@ -224,10 +216,7 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
     return response;
   }
 
-  private parseOutput(
-    response: string,
-    format: TemplateSection['outputFormat']
-  ): string | string[] | object {
+  private parseOutput(response: string, format: TemplateSection['outputFormat']): string | string[] | object {
     switch (format) {
       case 'list':
         try {
@@ -237,9 +226,9 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
           const match = response.match(/\[[\s\S]*\]/);
           if (match) return JSON.parse(match[0]);
           // Fall back to splitting by newlines
-          return response.split('\n').filter(line => line.trim());
+          return response.split('\n').filter((line) => line.trim());
         } catch {
-          return response.split('\n').filter(line => line.trim());
+          return response.split('\n').filter((line) => line.trim());
         }
 
       case 'json':
@@ -260,10 +249,7 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
   /**
    * Validate section output
    */
-  validateOutput(
-    output: string | string[] | object,
-    section: TemplateSection
-  ): { valid: boolean; errors: string[] } {
+  validateOutput(output: string | string[] | object, section: TemplateSection): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
 
     if (section.outputFormat === 'text' && typeof output === 'string') {
@@ -299,7 +285,7 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
 
       case 'rule':
         if (!template.applyTo.meetingPatterns) return false;
-        return template.applyTo.meetingPatterns.some(pattern => {
+        return template.applyTo.meetingPatterns.some((pattern) => {
           try {
             return new RegExp(pattern).test(meetingTitle);
           } catch {
@@ -314,8 +300,6 @@ ${section.maxItems ? `Include at most ${section.maxItems} items.` : ''}`;
 }
 
 // Export factory
-export function createTemplateProcessor(
-  summaryGenerator?: SummaryGenerator
-): TemplateProcessor {
+export function createTemplateProcessor(summaryGenerator?: SummaryGenerator): TemplateProcessor {
   return new TemplateProcessor(summaryGenerator);
 }

@@ -26,9 +26,7 @@ describe('Google OAuth Integration', () => {
         'profile',
       ];
 
-      mockGoogleAuth.generateAuthUrl.mockReturnValue(
-        'https://accounts.google.com/o/oauth2/v2/auth?...'
-      );
+      mockGoogleAuth.generateAuthUrl.mockReturnValue('https://accounts.google.com/o/oauth2/v2/auth?...');
 
       // Simulate generating auth URL
       const authUrl = mockGoogleAuth.generateAuthUrl({
@@ -41,7 +39,7 @@ describe('Google OAuth Integration', () => {
         expect.objectContaining({
           access_type: 'offline',
           scope: expect.arrayContaining(expectedScopes),
-        })
+        }),
       );
       expect(authUrl).toContain('accounts.google.com');
     });
@@ -55,9 +53,7 @@ describe('Google OAuth Integration', () => {
         scope: [],
       });
 
-      expect(mockGoogleAuth.generateAuthUrl).toHaveBeenCalledWith(
-        expect.objectContaining({ state })
-      );
+      expect(mockGoogleAuth.generateAuthUrl).toHaveBeenCalledWith(expect.objectContaining({ state }));
     });
   });
 
@@ -81,13 +77,9 @@ describe('Google OAuth Integration', () => {
     });
 
     it('should handle token exchange errors', async () => {
-      mockGoogleAuth.getToken.mockRejectedValue(
-        new Error('invalid_grant: Code expired')
-      );
+      mockGoogleAuth.getToken.mockRejectedValue(new Error('invalid_grant: Code expired'));
 
-      await expect(
-        mockGoogleAuth.getToken('expired-code')
-      ).rejects.toThrow('invalid_grant');
+      await expect(mockGoogleAuth.getToken('expired-code')).rejects.toThrow('invalid_grant');
     });
   });
 
@@ -124,11 +116,10 @@ describe('Google OAuth Integration', () => {
         'https://www.googleapis.com/auth/calendar.events.readonly',
       ];
 
-      const grantedScopes = 'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events.readonly openid email';
+      const grantedScopes =
+        'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events.readonly openid email';
 
-      const hasAllScopes = requiredScopes.every(scope =>
-        grantedScopes.includes(scope)
-      );
+      const hasAllScopes = requiredScopes.every((scope) => grantedScopes.includes(scope));
 
       expect(hasAllScopes).toBe(true);
     });
@@ -141,9 +132,7 @@ describe('Google OAuth Integration', () => {
 
       const grantedScopes = 'openid email'; // Missing calendar scopes
 
-      const hasAllScopes = requiredScopes.every(scope =>
-        grantedScopes.includes(scope)
-      );
+      const hasAllScopes = requiredScopes.every((scope) => grantedScopes.includes(scope));
 
       expect(hasAllScopes).toBe(false);
     });

@@ -30,7 +30,7 @@ const createBotSchema = z.object({
         url: z.string().url(),
         secret: z.string().optional(),
         events: z.array(z.string()).optional(),
-      })
+      }),
     )
     .optional(),
   metadata: z.record(z.unknown()).optional(),
@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
           recording: {
             select: { id: true, status: true, duration: true, fileSize: true },
           },
-          transcript: {
+          transcripts: {
             select: { id: true, status: true, wordCount: true },
           },
           summary: {
@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
     const validation = await validateBody(createBotSchema, bodyResult.data);
     if ('error' in validation) return validation.error;
 
-    const { meeting_url, bot_name, recording_mode, metadata } = validation.data;
+    const { meeting_url, bot_name, recording_mode, transcription, metadata } = validation.data;
 
     // Detect platform
     const platform = detectPlatform(meeting_url);
@@ -121,13 +121,11 @@ export async function POST(request: NextRequest) {
       return apiError(
         'INVALID_PLATFORM',
         'Could not detect meeting platform from URL. Supported: Zoom, Google Meet, Microsoft Teams.',
-        400
+        400,
       );
     }
 
-    const sanitizedBotName = bot_name
-      ? sanitizeString(bot_name, 100)
-      : 'Aramis Recorder';
+    const sanitizedBotName = bot_name ? sanitizeString(bot_name, 100) : 'Aramis Recorder';
 
     // Create meeting
     const meeting = await prisma.meeting.create({
@@ -165,12 +163,18 @@ export async function POST(request: NextRequest) {
           platform,
           botName: sanitizedBotName,
           recordingMode: recording_mode,
+          transcriptionConfig: transcription
+            ? {
+                provider: transcription.provider,
+                language: transcription.language,
+              }
+            : undefined,
           metadata,
         },
         {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-        }
+          attempts: 2,
+          backoff: { type: 'exponential', delay: 30000 },
+        },
       );
       await queue.close();
     } finally {

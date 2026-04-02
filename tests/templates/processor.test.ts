@@ -95,7 +95,7 @@ class TemplateProcessor {
   async processSection(
     section: TemplateSection,
     transcript: TranscriptContext,
-    context: MeetingContext
+    context: MeetingContext,
   ): Promise<string | string[] | object> {
     const prompt = this.resolveVariables(section.prompt, context, transcript);
 
@@ -107,7 +107,7 @@ class TemplateProcessor {
   private parseOutput(response: string, format: TemplateSection['outputFormat']): string | string[] | object {
     switch (format) {
       case 'list':
-        return response.split('\n').filter(line => line.trim());
+        return response.split('\n').filter((line) => line.trim());
       case 'json':
         try {
           return JSON.parse(response);
@@ -125,7 +125,7 @@ class TemplateProcessor {
   async processTemplate(
     template: SummaryTemplate,
     transcript: TranscriptContext,
-    context: MeetingContext
+    context: MeetingContext,
   ): Promise<Record<string, string | string[] | object>> {
     const results: Record<string, string | string[] | object> = {};
 
@@ -138,10 +138,7 @@ class TemplateProcessor {
     return results;
   }
 
-  validateOutput(
-    output: string | string[] | object,
-    section: TemplateSection
-  ): { valid: boolean; errors: string[] } {
+  validateOutput(output: string | string[] | object, section: TemplateSection): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
 
     if (section.outputFormat === 'text' && typeof output === 'string') {
@@ -167,7 +164,7 @@ describe('Template Processor', () => {
   let processor: TemplateProcessor;
 
   const sampleTranscript: TranscriptContext = {
-    fullText: 'John: Hello everyone. Jane: Hi John. Let\'s discuss the project...',
+    fullText: "John: Hello everyone. Jane: Hi John. Let's discuss the project...",
     duration: 1800,
     speakers: ['John', 'Jane'],
   };
@@ -388,9 +385,36 @@ describe('Template Processor', () => {
         name: 'Unordered Template',
         description: 'Template with unordered sections',
         sections: [
-          { id: '1', name: 'Third', key: 'third', description: '', prompt: '', required: true, order: 3, outputFormat: 'text' },
-          { id: '2', name: 'First', key: 'first', description: '', prompt: '', required: true, order: 1, outputFormat: 'text' },
-          { id: '3', name: 'Second', key: 'second', description: '', prompt: '', required: true, order: 2, outputFormat: 'text' },
+          {
+            id: '1',
+            name: 'Third',
+            key: 'third',
+            description: '',
+            prompt: '',
+            required: true,
+            order: 3,
+            outputFormat: 'text',
+          },
+          {
+            id: '2',
+            name: 'First',
+            key: 'first',
+            description: '',
+            prompt: '',
+            required: true,
+            order: 1,
+            outputFormat: 'text',
+          },
+          {
+            id: '3',
+            name: 'Second',
+            key: 'second',
+            description: '',
+            prompt: '',
+            required: true,
+            order: 2,
+            outputFormat: 'text',
+          },
         ],
         includeDefaultSections: false,
       };
@@ -457,10 +481,46 @@ describe('Built-in Templates', () => {
       name: 'Sales Call',
       description: 'Template for sales discovery and demo calls',
       sections: [
-        { id: '1', name: 'Customer Overview', key: 'customer-overview', description: '', prompt: 'Summarize the customer', required: true, order: 1, outputFormat: 'text' },
-        { id: '2', name: 'Pain Points', key: 'pain-points', description: '', prompt: 'List pain points', required: true, order: 2, outputFormat: 'list' },
-        { id: '3', name: 'Requirements', key: 'requirements', description: '', prompt: 'List requirements', required: true, order: 3, outputFormat: 'list' },
-        { id: '4', name: 'Next Steps', key: 'next-steps', description: '', prompt: 'List next steps', required: true, order: 4, outputFormat: 'list' },
+        {
+          id: '1',
+          name: 'Customer Overview',
+          key: 'customer-overview',
+          description: '',
+          prompt: 'Summarize the customer',
+          required: true,
+          order: 1,
+          outputFormat: 'text',
+        },
+        {
+          id: '2',
+          name: 'Pain Points',
+          key: 'pain-points',
+          description: '',
+          prompt: 'List pain points',
+          required: true,
+          order: 2,
+          outputFormat: 'list',
+        },
+        {
+          id: '3',
+          name: 'Requirements',
+          key: 'requirements',
+          description: '',
+          prompt: 'List requirements',
+          required: true,
+          order: 3,
+          outputFormat: 'list',
+        },
+        {
+          id: '4',
+          name: 'Next Steps',
+          key: 'next-steps',
+          description: '',
+          prompt: 'List next steps',
+          required: true,
+          order: 4,
+          outputFormat: 'list',
+        },
       ],
       includeDefaultSections: true,
       applyTo: { type: 'rule', meetingPatterns: ['.*[Ss]ales.*', '.*[Dd]emo.*'] },
@@ -470,8 +530,26 @@ describe('Built-in Templates', () => {
       name: 'Engineering Standup',
       description: 'Template for daily standups',
       sections: [
-        { id: '1', name: 'Updates by Person', key: 'updates', description: '', prompt: 'List updates by person', required: true, order: 1, outputFormat: 'json' },
-        { id: '2', name: 'Blockers', key: 'blockers', description: '', prompt: 'List blockers', required: true, order: 2, outputFormat: 'list' },
+        {
+          id: '1',
+          name: 'Updates by Person',
+          key: 'updates',
+          description: '',
+          prompt: 'List updates by person',
+          required: true,
+          order: 1,
+          outputFormat: 'json',
+        },
+        {
+          id: '2',
+          name: 'Blockers',
+          key: 'blockers',
+          description: '',
+          prompt: 'List blockers',
+          required: true,
+          order: 2,
+          outputFormat: 'list',
+        },
       ],
       includeDefaultSections: false,
       applyTo: { type: 'rule', meetingPatterns: ['.*[Ss]tandup.*', '.*[Dd]aily.*'] },
@@ -494,37 +572,37 @@ describe('Built-in Templates', () => {
   });
 
   it('should match sales meetings with Sales Call template', () => {
-    const salesTemplate = builtInTemplates.find(t => t.id === 'sales-call');
+    const salesTemplate = builtInTemplates.find((t) => t.id === 'sales-call');
     const patterns = salesTemplate?.applyTo?.meetingPatterns || [];
 
     const salesTitles = ['Sales Call with Acme', 'Demo for Customer', 'Product Demo'];
     const nonSalesTitles = ['Team Standup', 'Engineering Sync'];
 
     for (const title of salesTitles) {
-      const matches = patterns.some(pattern => new RegExp(pattern).test(title));
+      const matches = patterns.some((pattern) => new RegExp(pattern).test(title));
       expect(matches).toBe(true);
     }
 
     for (const title of nonSalesTitles) {
-      const matches = patterns.some(pattern => new RegExp(pattern).test(title));
+      const matches = patterns.some((pattern) => new RegExp(pattern).test(title));
       expect(matches).toBe(false);
     }
   });
 
   it('should match standup meetings with Standup template', () => {
-    const standupTemplate = builtInTemplates.find(t => t.id === 'standup');
+    const standupTemplate = builtInTemplates.find((t) => t.id === 'standup');
     const patterns = standupTemplate?.applyTo?.meetingPatterns || [];
 
     const standupTitles = ['Daily Standup', 'Team Standup', 'Morning Daily'];
     const nonStandupTitles = ['Sales Demo', 'Planning Meeting'];
 
     for (const title of standupTitles) {
-      const matches = patterns.some(pattern => new RegExp(pattern).test(title));
+      const matches = patterns.some((pattern) => new RegExp(pattern).test(title));
       expect(matches).toBe(true);
     }
 
     for (const title of nonStandupTitles) {
-      const matches = patterns.some(pattern => new RegExp(pattern).test(title));
+      const matches = patterns.some((pattern) => new RegExp(pattern).test(title));
       expect(matches).toBe(false);
     }
   });

@@ -87,14 +87,11 @@ export class MicrosoftCalendarService {
       scope: SCOPES.join(' '),
     });
 
-    const response = await fetch(
-      `https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString(),
-      }
-    );
+    const response = await fetch(`https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
 
     if (!response.ok) {
       const error = await response.text();
@@ -131,14 +128,11 @@ export class MicrosoftCalendarService {
       scope: SCOPES.join(' '),
     });
 
-    const response = await fetch(
-      `https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString(),
-      }
-    );
+    const response = await fetch(`https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
 
     if (!response.ok) {
       const error = await response.text();
@@ -261,15 +255,13 @@ export class MicrosoftCalendarService {
       startDateTime?: Date;
       endDateTime?: Date;
       top?: number;
-    } = {}
+    } = {},
   ): Promise<MicrosoftEvent[]> {
     const client = await this.createClientFromConnection(connectionId);
 
     const now = new Date();
     const startDateTime = (options.startDateTime || now).toISOString();
-    const endDateTime = (
-      options.endDateTime || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-    ).toISOString();
+    const endDateTime = (options.endDateTime || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)).toISOString();
 
     const response = await client
       .api(`/me/calendars/${calendarId}/calendarView`)
@@ -278,7 +270,8 @@ export class MicrosoftCalendarService {
         endDateTime,
         $top: options.top || 100,
         $orderby: 'start/dateTime',
-        $select: 'id,subject,body,start,end,isAllDay,location,onlineMeeting,organizer,attendees,seriesMasterId,isCancelled',
+        $select:
+          'id,subject,body,start,end,isAllDay,location,onlineMeeting,organizer,attendees,seriesMasterId,isCancelled',
       })
       .get();
 
@@ -298,10 +291,7 @@ export class MicrosoftCalendarService {
       throw new Error('Calendar not found');
     }
 
-    const events = await this.fetchEvents(
-      dbCalendar.connectionId,
-      dbCalendar.externalId
-    );
+    const events = await this.fetchEvents(dbCalendar.connectionId, dbCalendar.externalId);
 
     let syncedCount = 0;
 
@@ -359,7 +349,7 @@ export class MicrosoftCalendarService {
           meetingUrl,
           platform,
           organizer: event.organizer?.emailAddress?.address,
-          attendees: event.attendees?.map((a) => a.emailAddress?.address).filter(Boolean) as string[] || [],
+          attendees: (event.attendees?.map((a) => a.emailAddress?.address).filter(Boolean) as string[]) || [],
           isRecurring: !!event.seriesMasterId,
           recurringId: event.seriesMasterId,
           isCancelled: event.isCancelled || false,
@@ -375,7 +365,7 @@ export class MicrosoftCalendarService {
           meetingUrl,
           platform,
           organizer: event.organizer?.emailAddress?.address,
-          attendees: event.attendees?.map((a) => a.emailAddress?.address).filter(Boolean) as string[] || [],
+          attendees: (event.attendees?.map((a) => a.emailAddress?.address).filter(Boolean) as string[]) || [],
           isRecurring: !!event.seriesMasterId,
           recurringId: event.seriesMasterId,
           isCancelled: event.isCancelled || false,

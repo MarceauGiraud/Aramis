@@ -36,9 +36,7 @@ describe('Database Schema', () => {
 
       await prisma.user.create({ data: { email } });
 
-      await expect(
-        prisma.user.create({ data: { email } })
-      ).rejects.toThrow();
+      await expect(prisma.user.create({ data: { email } })).rejects.toThrow();
 
       // Cleanup
       await prisma.user.delete({ where: { email } });
@@ -302,9 +300,7 @@ describe('Database Schema', () => {
             { topic: 'Budget', summary: 'Discussed Q4 budget allocation' },
             { topic: 'Timeline', summary: 'Agreed on key milestones' },
           ],
-          decisions: [
-            { description: 'Approved $50k marketing budget', madeBy: 'John' },
-          ],
+          decisions: [{ description: 'Approved $50k marketing budget', madeBy: 'John' }],
           actionItems: [
             {
               description: 'Create marketing plan',

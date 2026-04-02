@@ -4,10 +4,7 @@ import { apiError, parsePagination, paginatedResponse } from '@/lib/api-helpers'
 
 // GET /api/bots/:id/chat - paginated chat messages
 // Note: Requires ChatMessage model (added by Agent 1). Falls back gracefully.
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },

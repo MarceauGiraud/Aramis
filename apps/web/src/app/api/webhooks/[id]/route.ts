@@ -18,10 +18,7 @@ async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
 const VALID_EVENTS = new Set(Object.values(WEBHOOK_EVENT_TYPES));
 
 // GET /api/webhooks/:id - Get webhook details
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -67,18 +64,12 @@ export async function GET(
     }
   } catch (error) {
     console.error('Error fetching webhook:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch webhook' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch webhook' }, { status: 500 });
   }
 }
 
 // DELETE /api/webhooks/:id - Remove webhook
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -105,18 +96,12 @@ export async function DELETE(
     }
   } catch (error) {
     console.error('Error deleting webhook:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete webhook' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to delete webhook' }, { status: 500 });
   }
 }
 
 // PATCH /api/webhooks/:id - Update webhook
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -147,17 +132,11 @@ export async function PATCH(
     // Validate events if provided
     if (events !== undefined) {
       if (!Array.isArray(events) || events.length === 0) {
-        return NextResponse.json(
-          { error: 'events must be a non-empty array' },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: 'events must be a non-empty array' }, { status: 400 });
       }
       for (const event of events) {
         if (event !== '*' && !VALID_EVENTS.has(event)) {
-          return NextResponse.json(
-            { error: `Invalid event type: ${event}` },
-            { status: 400 }
-          );
+          return NextResponse.json({ error: `Invalid event type: ${event}` }, { status: 400 });
         }
       }
     }
@@ -193,9 +172,6 @@ export async function PATCH(
     }
   } catch (error) {
     console.error('Error updating webhook:', error);
-    return NextResponse.json(
-      { error: 'Failed to update webhook' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update webhook' }, { status: 500 });
   }
 }

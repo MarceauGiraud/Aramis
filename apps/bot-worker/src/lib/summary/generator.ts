@@ -110,7 +110,7 @@ export class SummaryGenerator {
 
   constructor(config?: Partial<SummaryGeneratorConfig>) {
     this.config = {
-      provider: config?.provider || 'openai',
+      provider: config?.provider || 'anthropic',
       model: config?.model,
       apiKey: config?.apiKey,
       maxTokens: config?.maxTokens || 4000,
@@ -125,12 +125,12 @@ export class SummaryGenerator {
       this.openaiClient = new OpenAI({
         apiKey: this.config.apiKey || process.env.OPENAI_API_KEY,
       });
-      this.config.model = this.config.model || 'gpt-4-turbo-preview';
+      this.config.model = this.config.model || 'gpt-5.4-2026-03-05';
     } else {
       this.anthropicClient = new Anthropic({
         apiKey: this.config.apiKey || process.env.ANTHROPIC_API_KEY,
       });
-      this.config.model = this.config.model || 'claude-3-sonnet-20240229';
+      this.config.model = this.config.model || 'claude-sonnet-4-20250514';
     }
   }
 
@@ -140,7 +140,7 @@ export class SummaryGenerator {
   async generateSummary(
     transcript: TranscriptInput,
     context: MeetingContext,
-    customPrompt?: string
+    customPrompt?: string,
   ): Promise<MeetingSummary> {
     logger.info(`Generating summary for meeting: ${context.title}`);
 
@@ -157,11 +157,7 @@ export class SummaryGenerator {
     return this.parseResponse(response);
   }
 
-  private buildPrompt(
-    template: string,
-    transcript: TranscriptInput,
-    context: MeetingContext
-  ): string {
+  private buildPrompt(template: string, transcript: TranscriptInput, context: MeetingContext): string {
     const duration = this.formatDuration(transcript.duration);
 
     return template
@@ -235,7 +231,7 @@ export class SummaryGenerator {
       ],
     });
 
-    const textBlock = response.content.find((block) => block.type === 'text');
+    const textBlock = response.content.find((block: any) => block.type === 'text');
     return textBlock && 'text' in textBlock ? textBlock.text : '{}';
   }
 
@@ -273,9 +269,7 @@ export class SummaryGenerator {
               description: ai.description || '',
               assignee: ai.assignee || 'Unassigned',
               dueDate: ai.dueDate || null,
-              priority: ['high', 'medium', 'low'].includes(ai.priority)
-                ? ai.priority
-                : 'medium',
+              priority: ['high', 'medium', 'low'].includes(ai.priority) ? ai.priority : 'medium',
               status: ai.status || 'pending',
             }))
           : [],
@@ -289,8 +283,6 @@ export class SummaryGenerator {
 }
 
 // Export factory function
-export function createSummaryGenerator(
-  config?: Partial<SummaryGeneratorConfig>
-): SummaryGenerator {
+export function createSummaryGenerator(config?: Partial<SummaryGeneratorConfig>): SummaryGenerator {
   return new SummaryGenerator(config);
 }

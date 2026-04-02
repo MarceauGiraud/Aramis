@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
     });
 
     // Strip sensitive token data
-    const sanitized = connections.map(conn => ({
+    const sanitized = connections.map((conn) => ({
       id: conn.id,
       provider: conn.provider,
       email: conn.email,
@@ -53,10 +53,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ data: sanitized });
   } catch (error) {
     console.error('Error fetching calendar connections:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch calendar connections' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch calendar connections' }, { status: 500 });
   }
 }
 
@@ -78,25 +75,19 @@ export async function POST(request: NextRequest) {
     const { provider } = body;
 
     if (!provider || !['GOOGLE', 'MICROSOFT'].includes(provider)) {
-      return NextResponse.json(
-        { error: 'Invalid provider. Must be GOOGLE or MICROSOFT.' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Invalid provider. Must be GOOGLE or MICROSOFT.' }, { status: 400 });
     }
 
     if (provider === 'GOOGLE') {
       // Build Google OAuth URL
       const clientId = process.env.GOOGLE_CLIENT_ID;
       if (!clientId) {
-        return NextResponse.json(
-          { error: 'Google OAuth is not configured' },
-          { status: 503 }
-        );
+        return NextResponse.json({ error: 'Google OAuth is not configured' }, { status: 503 });
       }
 
       const redirectUri = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/api/calendars/callback/google`;
       const scope = encodeURIComponent(
-        'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events.readonly openid email profile'
+        'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events.readonly openid email profile',
       );
       const state = encodeURIComponent(JSON.stringify({ userId, provider }));
 
@@ -110,15 +101,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Microsoft OAuth (placeholder)
-    return NextResponse.json(
-      { error: 'Microsoft OAuth is not yet implemented' },
-      { status: 501 }
-    );
+    return NextResponse.json({ error: 'Microsoft OAuth is not yet implemented' }, { status: 501 });
   } catch (error) {
     console.error('Error initiating OAuth flow:', error);
-    return NextResponse.json(
-      { error: 'Failed to initiate OAuth flow' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to initiate OAuth flow' }, { status: 500 });
   }
 }

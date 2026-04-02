@@ -1,0 +1,8 @@
+node_modules
+.git
+.next
+.docker-data
+*.md
+dist
+.env.local
+.env.development

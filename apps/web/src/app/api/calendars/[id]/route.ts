@@ -14,10 +14,7 @@ async function getCurrentUserId(_request: NextRequest): Promise<string | null> {
 }
 
 // GET /api/calendars/:id - Get connection details
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -52,7 +49,7 @@ export async function GET(
       syncError: connection.syncError,
       createdAt: connection.createdAt,
       updatedAt: connection.updatedAt,
-      calendars: connection.calendars.map(cal => ({
+      calendars: connection.calendars.map((cal) => ({
         id: cal.id,
         name: cal.name,
         color: cal.color,
@@ -64,18 +61,12 @@ export async function GET(
     });
   } catch (error) {
     console.error('Error fetching calendar connection:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch calendar connection' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch calendar connection' }, { status: 500 });
   }
 }
 
 // DELETE /api/calendars/:id - Disconnect
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const userId = await getCurrentUserId(request);
     if (!userId) {
@@ -99,9 +90,6 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting calendar connection:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete calendar connection' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to delete calendar connection' }, { status: 500 });
   }
 }

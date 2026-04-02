@@ -11,12 +11,7 @@
 import OpenAI from 'openai';
 import * as fs from 'fs';
 import { logger } from '../logger';
-import {
-  TranscriptionProvider,
-  TranscribeOptions,
-  TranscriptionResult,
-  TranscriptSegment,
-} from './provider-interface';
+import { TranscriptionProvider, TranscribeOptions, TranscriptionResult, TranscriptSegment } from './provider-interface';
 
 export interface OpenAITranscriptionConfig {
   apiKey: string;
@@ -110,9 +105,10 @@ export class OpenAITranscriptionProvider implements TranscriptionProvider {
           text: seg.text?.trim() || '',
           startTime: seg.start || 0,
           endTime: seg.end || 0,
-          confidence: seg.avg_logprob != null
-            ? Math.exp(seg.avg_logprob) // Convert log probability to probability
-            : undefined,
+          confidence:
+            seg.avg_logprob != null
+              ? Math.exp(seg.avg_logprob) // Convert log probability to probability
+              : undefined,
           words: [],
         };
 
@@ -125,10 +121,7 @@ export class OpenAITranscriptionProvider implements TranscriptionProvider {
       let segmentIndex = 0;
       for (const word of response.words) {
         // Find the appropriate segment for this word
-        while (
-          segmentIndex < segments.length - 1 &&
-          word.start >= segments[segmentIndex + 1].startTime
-        ) {
+        while (segmentIndex < segments.length - 1 && word.start >= segments[segmentIndex + 1].startTime) {
           segmentIndex++;
         }
 
@@ -145,11 +138,9 @@ export class OpenAITranscriptionProvider implements TranscriptionProvider {
       }
     }
 
-    const fullText = response.text || segments.map(s => s.text).join(' ');
+    const fullText = response.text || segments.map((s) => s.text).join(' ');
     const detectedLanguage = response.language || language;
-    const duration = response.duration || (segments.length > 0
-      ? segments[segments.length - 1].endTime
-      : 0);
+    const duration = response.duration || (segments.length > 0 ? segments[segments.length - 1].endTime : 0);
 
     return {
       segments,
@@ -162,7 +153,7 @@ export class OpenAITranscriptionProvider implements TranscriptionProvider {
 }
 
 export function createOpenAITranscriptionProvider(
-  config?: Partial<OpenAITranscriptionConfig>
+  config?: Partial<OpenAITranscriptionConfig>,
 ): OpenAITranscriptionProvider {
   return new OpenAITranscriptionProvider(config);
 }

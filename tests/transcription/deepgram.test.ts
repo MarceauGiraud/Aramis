@@ -422,8 +422,8 @@ describe('Speaker Identification', () => {
 
     const speakers = identifySpeakers(segments);
 
-    const speaker1 = speakers.find(s => s.label === 'Speaker 1');
-    const speaker2 = speakers.find(s => s.label === 'Speaker 2');
+    const speaker1 = speakers.find((s) => s.label === 'Speaker 1');
+    const speaker2 = speakers.find((s) => s.label === 'Speaker 2');
 
     expect(speaker1?.duration).toBe(4); // 2 + 2
     expect(speaker2?.duration).toBe(1);
@@ -438,7 +438,7 @@ describe('Speaker Identification', () => {
 
     const speakers = identifySpeakers(segments);
 
-    const speaker1 = speakers.find(s => s.label === 'Speaker 1');
+    const speaker1 = speakers.find((s) => s.label === 'Speaker 1');
     expect(speaker1?.segments).toBe(2);
   });
 });

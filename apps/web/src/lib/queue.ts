@@ -53,11 +53,7 @@ export async function addMeetingBotJob(data: {
 }
 
 // Add a transcription job
-export async function addTranscriptionJob(data: {
-  meetingId: string;
-  audioUrl: string;
-  language?: string;
-}) {
+export async function addTranscriptionJob(data: { meetingId: string; audioUrl: string; language?: string }) {
   const queue = getTranscriptionQueue();
   return queue.add('transcribe', data, {
     attempts: 3,

@@ -13,20 +13,14 @@
  */
 
 import * as crypto from 'crypto';
-import { Worker } from 'bullmq';
+import { Worker, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { QUEUE_NAMES } from '@aramis/shared';
 import { logger } from './lib/logger';
 
 // Retry delays in milliseconds: 1min, 5min, 30min, 2h, 12h
-const RETRY_DELAYS = [
-  60 * 1000,
-  5 * 60 * 1000,
-  30 * 60 * 1000,
-  2 * 60 * 60 * 1000,
-  12 * 60 * 60 * 1000,
-];
+const RETRY_DELAYS = [60 * 1000, 5 * 60 * 1000, 30 * 60 * 1000, 2 * 60 * 60 * 1000, 12 * 60 * 60 * 1000];
 
 export interface WebhookDeliveryJobData {
   webhookId: string;
@@ -57,9 +51,7 @@ export function createWebhookDeliveryWorker(redis: IORedis) {
     async (job) => {
       const { webhookId, url, secret, payload, attempt, maxAttempts } = job.data;
 
-      logger.info(
-        `Delivering webhook ${webhookId} to ${url} (attempt ${attempt}/${maxAttempts}): ${payload.event}`
-      );
+      logger.info(`Delivering webhook ${webhookId} to ${url} (attempt ${attempt}/${maxAttempts}): ${payload.event}`);
 
       const timestamp = Math.floor(Date.now() / 1000).toString();
       const payloadJson = JSON.stringify(payload);
@@ -123,26 +115,28 @@ export function createWebhookDeliveryWorker(redis: IORedis) {
         const nextAttempt = attempt + 1;
         const delay = RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)];
 
-        logger.info(
-          `Scheduling retry ${nextAttempt}/${maxAttempts} for webhook ${webhookId} in ${delay / 1000}s`
-        );
+        logger.info(`Scheduling retry ${nextAttempt}/${maxAttempts} for webhook ${webhookId} in ${delay / 1000}s`);
 
         // Re-queue with delay for next attempt
-        const queue = job.queue;
-        if (queue) {
-          await queue.add('deliver', {
-            ...job.data,
-            attempt: nextAttempt,
-          }, {
-            delay,
-            removeOnComplete: 100,
-            removeOnFail: 1000,
-          });
+        const retryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: redis });
+        try {
+          await retryQueue.add(
+            'deliver',
+            {
+              ...job.data,
+              attempt: nextAttempt,
+            },
+            {
+              delay,
+              removeOnComplete: 100,
+              removeOnFail: 1000,
+            },
+          );
+        } finally {
+          await retryQueue.close();
         }
       } else {
-        logger.error(
-          `Webhook ${webhookId} delivery permanently failed after ${maxAttempts} attempts`
-        );
+        logger.error(`Webhook ${webhookId} delivery permanently failed after ${maxAttempts} attempts`);
       }
 
       // Return failure info (job itself succeeds to avoid BullMQ's own retry)
@@ -151,7 +145,7 @@ export function createWebhookDeliveryWorker(redis: IORedis) {
     {
       connection: redis,
       concurrency: parseInt(process.env.WEBHOOK_CONCURRENCY || '5'),
-    }
+    },
   );
 
   worker.on('completed', (job) => {
@@ -178,12 +172,13 @@ async function recordDelivery(
   response: string | null,
   attempt: number,
   maxAttempts: number,
-  error?: string
+  error?: string,
 ): Promise<void> {
   try {
-    const nextRetryAt = attempt < maxAttempts
-      ? new Date(Date.now() + RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)])
-      : null;
+    const nextRetryAt =
+      attempt < maxAttempts
+        ? new Date(Date.now() + RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)])
+        : null;
 
     await (prisma as any).webhookDelivery.create({
       data: {

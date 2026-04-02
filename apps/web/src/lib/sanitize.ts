@@ -27,10 +27,7 @@ export interface SanitizationRule {
  * Apply sanitization rules to an object's string properties.
  * Only processes keys present in the rules map.
  */
-export function sanitizeObject<T extends Record<string, unknown>>(
-  obj: T,
-  rules: Record<string, SanitizationRule>
-): T {
+export function sanitizeObject<T extends Record<string, unknown>>(obj: T, rules: Record<string, SanitizationRule>): T {
   const result = { ...obj };
   for (const [key, rule] of Object.entries(rules)) {
     if (key in result && typeof result[key] === 'string') {

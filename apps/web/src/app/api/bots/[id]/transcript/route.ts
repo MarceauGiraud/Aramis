@@ -3,10 +3,7 @@ import { prisma } from '@aramis/database';
 import { apiError, parsePagination, paginatedResponse } from '@/lib/api-helpers';
 
 // GET /api/bots/:id/transcript - paginated transcript segments
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
@@ -68,7 +65,7 @@ export async function GET(
       })),
       total,
       page,
-      limit
+      limit,
     );
   } catch (error) {
     console.error('Error fetching transcript:', error);

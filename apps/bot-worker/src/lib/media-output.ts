@@ -31,10 +31,12 @@ export class MediaOutputController {
   private virtualMicSink: string;
   private virtualCameraDevice: string;
 
-  constructor(options: {
-    virtualMicSink?: string;
-    virtualCameraDevice?: string;
-  } = {}) {
+  constructor(
+    options: {
+      virtualMicSink?: string;
+      virtualCameraDevice?: string;
+    } = {},
+  ) {
     this.virtualMicSink = options.virtualMicSink ?? process.env.PULSE_VIRTUAL_MIC ?? 'virtual_mic';
     this.virtualCameraDevice = options.virtualCameraDevice ?? process.env.V4L2_DEVICE ?? '/dev/video10';
   }
@@ -58,10 +60,7 @@ export class MediaOutputController {
 
     return new Promise((resolve, reject) => {
       // Use paplay for PulseAudio playback to specific sink
-      this.currentAudioProcess = spawn('paplay', [
-        '--device', this.virtualMicSink,
-        audioPath,
-      ], {
+      this.currentAudioProcess = spawn('paplay', ['--device', this.virtualMicSink, audioPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -89,14 +88,13 @@ export class MediaOutputController {
    */
   private playAudioWithFFplay(audioPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.currentAudioProcess = spawn('ffplay', [
-        '-nodisp',
-        '-autoexit',
-        '-af', `aresample=async=1,pan=mono|FC=FL`,
-        audioPath,
-      ], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      this.currentAudioProcess = spawn(
+        'ffplay',
+        ['-nodisp', '-autoexit', '-af', `aresample=async=1,pan=mono|FC=FL`, audioPath],
+        {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      );
 
       this.currentAudioProcess.on('exit', (code) => {
         this.currentAudioProcess = null;
@@ -133,10 +131,7 @@ export class MediaOutputController {
    * @param source - Path to video file, image, or URL
    * @param type - Type of source: 'file', 'image', or 'url'
    */
-  async setVideoSource(
-    source: string,
-    type: 'file' | 'image' | 'url' = 'file'
-  ): Promise<void> {
+  async setVideoSource(source: string, type: 'file' | 'image' | 'url' = 'file'): Promise<void> {
     // Stop any current video source
     this.stopVideo();
 
@@ -148,34 +143,38 @@ export class MediaOutputController {
       case 'file':
         args.push(
           '-re', // Read at native frame rate
-          '-i', source,
-          '-f', 'v4l2',
-          '-pix_fmt', 'yuv420p',
-          '-vcodec', 'rawvideo',
+          '-i',
+          source,
+          '-f',
+          'v4l2',
+          '-pix_fmt',
+          'yuv420p',
+          '-vcodec',
+          'rawvideo',
           this.virtualCameraDevice,
         );
         break;
 
       case 'image':
         args.push(
-          '-loop', '1',
-          '-i', source,
-          '-f', 'v4l2',
-          '-pix_fmt', 'yuv420p',
-          '-vcodec', 'rawvideo',
-          '-r', '1', // 1 fps for static image
+          '-loop',
+          '1',
+          '-i',
+          source,
+          '-f',
+          'v4l2',
+          '-pix_fmt',
+          'yuv420p',
+          '-vcodec',
+          'rawvideo',
+          '-r',
+          '1', // 1 fps for static image
           this.virtualCameraDevice,
         );
         break;
 
       case 'url':
-        args.push(
-          '-i', source,
-          '-f', 'v4l2',
-          '-pix_fmt', 'yuv420p',
-          '-vcodec', 'rawvideo',
-          this.virtualCameraDevice,
-        );
+        args.push('-i', source, '-f', 'v4l2', '-pix_fmt', 'yuv420p', '-vcodec', 'rawvideo', this.virtualCameraDevice);
         break;
     }
 
@@ -230,11 +229,7 @@ export class MediaOutputController {
   /**
    * TTS using Google Cloud Text-to-Speech API
    */
-  private async speakWithGoogleTTS(
-    text: string,
-    language: string,
-    apiKey: string
-  ): Promise<void> {
+  private async speakWithGoogleTTS(text: string, language: string, apiKey: string): Promise<void> {
     const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`;
 
     const body = JSON.stringify({
@@ -254,7 +249,7 @@ export class MediaOutputController {
         throw new Error(`Google TTS API error: ${response.status}`);
       }
 
-      const data = await response.json() as { audioContent: string };
+      const data = (await response.json()) as { audioContent: string };
       const audioBuffer = Buffer.from(data.audioContent, 'base64');
 
       // Write to temp file and play
@@ -265,7 +260,11 @@ export class MediaOutputController {
         await this.playAudio(tempPath);
       } finally {
         // Clean up temp file
-        try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(tempPath);
+        } catch {
+          /* ignore */
+        }
       }
     } catch (error) {
       logger.warn(`Google TTS failed, falling back to system TTS: ${error}`);

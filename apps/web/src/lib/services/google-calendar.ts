@@ -33,11 +33,7 @@ export class GoogleCalendarService {
    * Create OAuth2 client
    */
   private createOAuth2Client(): OAuth2Client {
-    return new google.auth.OAuth2(
-      this.config.clientId,
-      this.config.clientSecret,
-      this.config.redirectUri
-    );
+    return new google.auth.OAuth2(this.config.clientId, this.config.clientSecret, this.config.redirectUri);
   }
 
   /**
@@ -201,7 +197,7 @@ export class GoogleCalendarService {
       timeMin?: Date;
       timeMax?: Date;
       maxResults?: number;
-    } = {}
+    } = {},
   ): Promise<calendar_v3.Schema$Event[]> {
     const calendar = await this.createCalendarClient(connectionId);
 
@@ -231,10 +227,7 @@ export class GoogleCalendarService {
       throw new Error('Calendar not found');
     }
 
-    const events = await this.fetchEvents(
-      dbCalendar.connectionId,
-      dbCalendar.externalId
-    );
+    const events = await this.fetchEvents(dbCalendar.connectionId, dbCalendar.externalId);
 
     let syncedCount = 0;
 
@@ -259,9 +252,7 @@ export class GoogleCalendarService {
 
       // Check conference data
       if (!meetingUrl && event.conferenceData?.entryPoints) {
-        const videoEntry = event.conferenceData.entryPoints.find(
-          (ep) => ep.entryPointType === 'video'
-        );
+        const videoEntry = event.conferenceData.entryPoints.find((ep) => ep.entryPointType === 'video');
         if (videoEntry?.uri) {
           const info = extractMeetingUrl(videoEntry.uri);
           if (info) {

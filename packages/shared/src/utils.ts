@@ -156,14 +156,9 @@ export async function retry<T>(
     initialDelayMs?: number;
     maxDelayMs?: number;
     backoffMultiplier?: number;
-  } = {}
+  } = {},
 ): Promise<T> {
-  const {
-    maxAttempts = 3,
-    initialDelayMs = 1000,
-    maxDelayMs = 30000,
-    backoffMultiplier = 2,
-  } = options;
+  const { maxAttempts = 3, initialDelayMs = 1000, maxDelayMs = 30000, backoffMultiplier = 2 } = options;
 
   let lastError: Error | undefined;
   let delay = initialDelayMs;

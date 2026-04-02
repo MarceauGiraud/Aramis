@@ -70,11 +70,7 @@ export function decrypt(ciphertext: string): string {
 /**
  * Encrypt OAuth tokens
  */
-export function encryptTokens(tokens: {
-  accessToken: string;
-  refreshToken?: string;
-  expiresAt?: Date;
-}): {
+export function encryptTokens(tokens: { accessToken: string; refreshToken?: string; expiresAt?: Date }): {
   accessToken: string;
   refreshToken?: string;
   expiresAt?: Date;
@@ -89,20 +85,14 @@ export function encryptTokens(tokens: {
 /**
  * Decrypt OAuth tokens
  */
-export function decryptTokens(encryptedTokens: {
-  accessToken: string;
-  refreshToken?: string;
-  expiresAt?: Date;
-}): {
+export function decryptTokens(encryptedTokens: { accessToken: string; refreshToken?: string; expiresAt?: Date }): {
   accessToken: string;
   refreshToken?: string;
   expiresAt?: Date;
 } {
   return {
     accessToken: decrypt(encryptedTokens.accessToken),
-    refreshToken: encryptedTokens.refreshToken
-      ? decrypt(encryptedTokens.refreshToken)
-      : undefined,
+    refreshToken: encryptedTokens.refreshToken ? decrypt(encryptedTokens.refreshToken) : undefined,
     expiresAt: encryptedTokens.expiresAt,
   };
 }

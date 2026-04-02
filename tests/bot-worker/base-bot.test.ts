@@ -143,7 +143,7 @@ class BaseMeetingBot {
 
   protected emit(event: string, ...args: any[]): void {
     const handlers = this.eventHandlers.get(event) || [];
-    handlers.forEach(handler => handler(...args));
+    handlers.forEach((handler) => handler(...args));
   }
 
   protected async detectMeetingEnd(): Promise<boolean> {
@@ -264,7 +264,7 @@ describe('BaseMeetingBot', () => {
       await bot.startRecording();
 
       // Wait a bit to simulate recording time
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       const result = await bot.stopRecording();
 
@@ -377,43 +377,31 @@ describe('BaseMeetingBot', () => {
 describe('Platform-Specific Behavior', () => {
   describe('Meeting End Detection', () => {
     it('should detect when meeting has ended (Zoom)', () => {
-      const endIndicators = [
-        'This meeting has been ended by host',
-        'The host has ended this meeting',
-        'Meeting ended',
-      ];
+      const endIndicators = ['This meeting has been ended by host', 'The host has ended this meeting', 'Meeting ended'];
 
       for (const indicator of endIndicators) {
         const pageContent = `<div>${indicator}</div>`;
-        const hasEnded = endIndicators.some(i => pageContent.includes(i));
+        const hasEnded = endIndicators.some((i) => pageContent.includes(i));
         expect(hasEnded).toBe(true);
       }
     });
 
     it('should detect when meeting has ended (Teams)', () => {
-      const endIndicators = [
-        'You left the meeting',
-        'The meeting has ended',
-        'Call ended',
-      ];
+      const endIndicators = ['You left the meeting', 'The meeting has ended', 'Call ended'];
 
       for (const indicator of endIndicators) {
         const pageContent = `<div>${indicator}</div>`;
-        const hasEnded = endIndicators.some(i => pageContent.includes(i));
+        const hasEnded = endIndicators.some((i) => pageContent.includes(i));
         expect(hasEnded).toBe(true);
       }
     });
 
     it('should detect when meeting has ended (Google Meet)', () => {
-      const endIndicators = [
-        'You left the meeting',
-        'Return to home screen',
-        'The call has ended',
-      ];
+      const endIndicators = ['You left the meeting', 'Return to home screen', 'The call has ended'];
 
       for (const indicator of endIndicators) {
         const pageContent = `<div>${indicator}</div>`;
-        const hasEnded = endIndicators.some(i => pageContent.includes(i));
+        const hasEnded = endIndicators.some((i) => pageContent.includes(i));
         expect(hasEnded).toBe(true);
       }
     });
@@ -427,18 +415,15 @@ describe('Platform-Specific Behavior', () => {
       ];
 
       const pageContent = 'Please wait, the meeting host will let you in soon';
-      const isWaiting = waitingIndicators.some(i => pageContent.includes(i));
+      const isWaiting = waitingIndicators.some((i) => pageContent.includes(i));
       expect(isWaiting).toBe(true);
     });
 
     it('should detect waiting room (Teams)', () => {
-      const waitingIndicators = [
-        'Someone in the meeting should let you in soon',
-        'Waiting to be admitted',
-      ];
+      const waitingIndicators = ['Someone in the meeting should let you in soon', 'Waiting to be admitted'];
 
       const pageContent = 'Waiting to be admitted';
-      const isWaiting = waitingIndicators.some(i => pageContent.includes(i));
+      const isWaiting = waitingIndicators.some((i) => pageContent.includes(i));
       expect(isWaiting).toBe(true);
     });
   });

@@ -4,16 +4,13 @@ import { apiError } from '@/lib/api-helpers';
 import { deleteS3Prefix } from '@/lib/s3';
 
 // DELETE /api/bots/:id/data - GDPR data deletion
-export async function DELETE(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
       include: {
         recording: true,
-        transcript: true,
+        transcripts: true,
         summary: true,
         botSession: true,
       },
@@ -43,7 +40,7 @@ export async function DELETE(
       deleted: {
         meeting: true,
         recording: !!meeting.recording,
-        transcript: !!meeting.transcript,
+        transcripts: (meeting as any).transcripts?.length > 0,
         summary: !!meeting.summary,
         botSession: !!meeting.botSession,
         s3Objects: s3Deleted,

@@ -7,9 +7,7 @@ import { logger } from '../lib/logger';
  * Find RecordingChunks older than the retention period,
  * delete from S3 and database.
  */
-export async function clearOldChunks(
-  retentionDays: number = DEFAULT_CHUNK_RETENTION_DAYS
-): Promise<number> {
+export async function clearOldChunks(retentionDays: number = DEFAULT_CHUNK_RETENTION_DAYS): Promise<number> {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - retentionDays);
 
@@ -51,12 +49,10 @@ export async function clearOldChunks(
       // Delete from S3
       if (s3Client && chunk.s3Key) {
         try {
-          await s3Client.send(
-            new DeleteObjectCommand({ Bucket: bucket, Key: chunk.s3Key })
-          );
+          await s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: chunk.s3Key }));
         } catch (s3Error) {
           logger.warn(
-            `Failed to delete S3 object ${chunk.s3Key}: ${s3Error instanceof Error ? s3Error.message : s3Error}`
+            `Failed to delete S3 object ${chunk.s3Key}: ${s3Error instanceof Error ? s3Error.message : s3Error}`,
           );
         }
       }
@@ -68,9 +64,7 @@ export async function clearOldChunks(
 
       deleted++;
     } catch (error) {
-      logger.error(
-        `Failed to delete chunk ${chunk.id}: ${error instanceof Error ? error.message : error}`
-      );
+      logger.error(`Failed to delete chunk ${chunk.id}: ${error instanceof Error ? error.message : error}`);
     }
   }
 

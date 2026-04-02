@@ -1,14 +1,13 @@
 import { prisma } from '@aramis/database';
 import { STALE_BOT_THRESHOLD_MS } from '@aramis/shared';
 import { logger } from '../lib/logger';
+import { stateMachine } from '../lib/bot-state-machine';
 
 /**
  * Find BotSessions with status RUNNING and heartbeatAt (lastPing) older than threshold.
  * Mark them as ERROR, update meeting to FAILED.
  */
-export async function cleanupStaleBots(
-  thresholdMs: number = STALE_BOT_THRESHOLD_MS
-): Promise<number> {
+export async function cleanupStaleBots(thresholdMs: number = STALE_BOT_THRESHOLD_MS): Promise<number> {
   const cutoff = new Date(Date.now() - thresholdMs);
 
   const staleSessions = await prisma.botSession.findMany({
@@ -30,42 +29,51 @@ export async function cleanupStaleBots(
 
   for (const session of staleSessions) {
     try {
-      await prisma.$transaction([
-        prisma.botSession.update({
-          where: { id: session.id },
-          data: { status: 'ERROR' },
-        }),
-        prisma.meeting.update({
-          where: { id: session.meetingId },
-          data: {
-            status: 'FAILED',
-            errorMessage: `Bot session became stale (no heartbeat since ${session.lastPing?.toISOString()})`,
-          },
-        }),
-        prisma.botLog.create({
-          data: {
-            botSessionId: session.id,
-            level: 'ERROR',
-            message: 'Bot session marked as stale - no heartbeat received',
-            metadata: {
-              lastPing: session.lastPing?.toISOString(),
-              threshold: `${thresholdMs}ms`,
-            },
-          },
-        }),
-      ]);
+      const staleError = new Error(`Bot session became stale (no heartbeat since ${session.lastPing?.toISOString()})`);
+      await stateMachine.failWithError(
+        session.meetingId,
+        staleError,
+        `Stale bot cleanup (threshold: ${thresholdMs}ms)`,
+      );
 
-      logger.info(
-        `Cleaned up stale session ${session.id} for meeting ${session.meetingId}`
-      );
+      logger.info(`Cleaned up stale session ${session.id} for meeting ${session.meetingId}`);
     } catch (error) {
-      logger.error(
-        `Failed to clean up session ${session.id}: ${error instanceof Error ? error.message : error}`
-      );
+      logger.error(`Failed to clean up session ${session.id}: ${error instanceof Error ? error.message : error}`);
     }
   }
 
-  return staleSessions.length;
+  // Also clean up meetings stuck in PROCESSING or RECORDING with no active session.
+  // This happens when the worker crashes during recording or post-processing.
+  const stuckMeetings = await prisma.meeting.findMany({
+    where: {
+      status: { in: ['PROCESSING', 'RECORDING', 'JOINING'] },
+      updatedAt: { lt: cutoff },
+    },
+    select: { id: true, status: true, updatedAt: true },
+  });
+
+  for (const meeting of stuckMeetings) {
+    try {
+      await prisma.meeting.update({
+        where: { id: meeting.id },
+        data: {
+          status: 'FAILED',
+          errorMessage: `Meeting stuck in ${meeting.status} since ${meeting.updatedAt?.toISOString()} — auto-cleaned`,
+        },
+      });
+      logger.info(
+        `Cleaned up stuck meeting ${meeting.id} (was ${meeting.status} since ${meeting.updatedAt?.toISOString()})`,
+      );
+    } catch (error) {
+      logger.error(`Failed to clean up stuck meeting ${meeting.id}: ${error}`);
+    }
+  }
+
+  if (stuckMeetings.length > 0) {
+    logger.info(`Cleaned up ${stuckMeetings.length} stuck meeting(s)`);
+  }
+
+  return staleSessions.length + stuckMeetings.length;
 }
 
 // CLI entry point

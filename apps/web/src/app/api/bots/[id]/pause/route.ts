@@ -5,10 +5,7 @@ import { BOT_COMMANDS_CHANNEL, BOT_COMMAND_TYPES } from '@aramis/shared';
 import { apiError } from '@/lib/api-helpers';
 
 // POST /api/bots/:id/pause - pause recording
-export async function POST(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { id: params.id },
@@ -30,7 +27,7 @@ export async function POST(
         JSON.stringify({
           type: BOT_COMMAND_TYPES.PAUSE,
           meetingId: params.id,
-        })
+        }),
       );
     } finally {
       await redis.quit();

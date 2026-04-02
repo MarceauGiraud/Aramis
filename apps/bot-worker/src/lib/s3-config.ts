@@ -14,12 +14,7 @@ export interface S3Config {
  * Check if S3 is configured (non-throwing)
  */
 export function isS3Configured(): boolean {
-  return !!(
-    process.env.S3_ENDPOINT &&
-    process.env.S3_ACCESS_KEY &&
-    process.env.S3_SECRET_KEY &&
-    process.env.S3_BUCKET
-  );
+  return !!(process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && process.env.S3_SECRET_KEY && process.env.S3_BUCKET);
 }
 
 /**

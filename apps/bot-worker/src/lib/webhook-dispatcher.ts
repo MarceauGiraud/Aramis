@@ -82,7 +82,7 @@ export class WebhookDispatcher {
     }
 
     const matchingWebhooks = webhooks.filter(
-      wh => wh.isActive && (wh.events.includes('*') || wh.events.includes(event.type))
+      (wh) => wh.isActive && (wh.events.includes('*') || wh.events.includes(event.type)),
     );
 
     if (matchingWebhooks.length === 0) {
@@ -90,7 +90,7 @@ export class WebhookDispatcher {
     }
 
     logger.info(
-      `Dispatching event '${event.type}' for meeting ${event.meetingId} to ${matchingWebhooks.length} webhooks`
+      `Dispatching event '${event.type}' for meeting ${event.meetingId} to ${matchingWebhooks.length} webhooks`,
     );
 
     const payload = {
@@ -102,23 +102,27 @@ export class WebhookDispatcher {
 
     for (const webhook of matchingWebhooks) {
       try {
-        await this.deliveryQueue.add('deliver', {
-          webhookId: webhook.id,
-          url: webhook.url,
-          secret: webhook.secret,
-          payload,
-          attempt: 1,
-          maxAttempts: 5,
-        }, {
-          attempts: 5,
-          backoff: {
-            type: 'custom',
+        await this.deliveryQueue.add(
+          'deliver',
+          {
+            webhookId: webhook.id,
+            url: webhook.url,
+            secret: webhook.secret,
+            payload,
+            attempt: 1,
+            maxAttempts: 5,
           },
-          // Set delay based on attempt number for exponential backoff
-          // 1min, 5min, 30min, 2h, 12h
-          removeOnComplete: 100,
-          removeOnFail: 1000,
-        });
+          {
+            attempts: 5,
+            backoff: {
+              type: 'custom',
+            },
+            // Set delay based on attempt number for exponential backoff
+            // 1min, 5min, 30min, 2h, 12h
+            removeOnComplete: 100,
+            removeOnFail: 1000,
+          },
+        );
       } catch (error) {
         logger.error(`Failed to queue webhook delivery for ${webhook.url}: ${error}`);
       }

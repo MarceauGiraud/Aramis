@@ -2,17 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@aramis/database';
 
 // GET /api/meetings/:id/chat - Get chat messages for a meeting
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     // Validate meeting ID format (CUID)
     if (!params.id || !/^c[a-z0-9]{24}$/i.test(params.id)) {
-      return NextResponse.json(
-        { error: 'Invalid meeting ID format' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Invalid meeting ID format' }, { status: 400 });
     }
 
     // Verify meeting exists
@@ -22,10 +16,7 @@ export async function GET(
     });
 
     if (!meeting) {
-      return NextResponse.json(
-        { error: 'Meeting not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Meeting not found' }, { status: 404 });
     }
 
     // Fetch chat messages ordered by timestamp
@@ -50,9 +41,6 @@ export async function GET(
     }
   } catch (error) {
     console.error('Error fetching chat messages:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch chat messages' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch chat messages' }, { status: 500 });
   }
 }

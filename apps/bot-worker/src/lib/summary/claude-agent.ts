@@ -70,7 +70,8 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'get_segment_by_time',
-    description: 'Get the transcript segment at a specific timestamp. Useful for examining a particular moment in the meeting.',
+    description:
+      'Get the transcript segment at a specific timestamp. Useful for examining a particular moment in the meeting.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -88,7 +89,8 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'get_speaker_segments',
-    description: 'Get all segments where a specific speaker is talking. Useful for understanding what a particular person said.',
+    description:
+      'Get all segments where a specific speaker is talking. Useful for understanding what a particular person said.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -106,7 +108,8 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'verify_claim',
-    description: 'Verify if a specific claim or statement was actually made in the meeting. Returns evidence from the transcript.',
+    description:
+      'Verify if a specific claim or statement was actually made in the meeting. Returns evidence from the transcript.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -120,7 +123,8 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'get_meeting_stats',
-    description: 'Get statistics about the meeting: total duration, speaking time per person, number of topics discussed.',
+    description:
+      'Get statistics about the meeting: total duration, speaking time per person, number of topics discussed.',
     input_schema: {
       type: 'object' as const,
       properties: {},
@@ -191,10 +195,12 @@ export class ClaudeSummaryAgent {
   private context: MeetingContext;
   private maxIterations: number;
 
-  constructor(options: {
-    apiKey?: string;
-    maxIterations?: number;
-  } = {}) {
+  constructor(
+    options: {
+      apiKey?: string;
+      maxIterations?: number;
+    } = {},
+  ) {
     this.client = new Anthropic({
       apiKey: options.apiKey || process.env.ANTHROPIC_API_KEY,
     });
@@ -206,10 +212,7 @@ export class ClaudeSummaryAgent {
   /**
    * Generate summary using agentic approach with tools
    */
-  async generateSummary(
-    transcript: TranscriptData,
-    context: MeetingContext
-  ): Promise<AgentSummary> {
+  async generateSummary(transcript: TranscriptData, context: MeetingContext): Promise<AgentSummary> {
     this.transcript = transcript;
     this.context = context;
 
@@ -278,9 +281,9 @@ export class ClaudeSummaryAgent {
       }
 
       // Check if agent is done (stop_reason is end_turn without tool calls)
-      if (response.stop_reason === 'end_turn' && !response.content.some(b => b.type === 'tool_use')) {
+      if (response.stop_reason === 'end_turn' && !response.content.some((b: any) => b.type === 'tool_use')) {
         // Agent finished without calling finalize_summary - extract from text
-        const textBlock = response.content.find(b => b.type === 'text');
+        const textBlock = response.content.find((b: any) => b.type === 'text');
         if (textBlock && textBlock.type === 'text') {
           logger.warn('Agent finished without finalize_summary, extracting from text');
           finalSummary = this.extractSummaryFromText(textBlock.text);
@@ -344,7 +347,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
 
   private async executeTool(
     name: string,
-    input: Record<string, unknown>
+    input: Record<string, unknown>,
   ): Promise<{ success: boolean; data?: unknown; error?: string }> {
     try {
       switch (name) {
@@ -375,10 +378,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
     }
   }
 
-  private toolSearchTranscript(
-    query: string,
-    speakerFilter?: string
-  ): { success: boolean; data: unknown } {
+  private toolSearchTranscript(query: string, speakerFilter?: string): { success: boolean; data: unknown } {
     const queryLower = query.toLowerCase();
     const results: Array<{
       text: string;
@@ -401,7 +401,9 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
           prevSegment?.text ? `[${prevSegment.speaker}]: ${prevSegment.text}` : '',
           `>>> [${segment.speaker}]: ${segment.text} <<<`,
           nextSegment?.text ? `[${nextSegment.speaker}]: ${nextSegment.text}` : '',
-        ].filter(Boolean).join('\n');
+        ]
+          .filter(Boolean)
+          .join('\n');
 
         results.push({
           text: segment.text,
@@ -423,16 +425,11 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
     };
   }
 
-  private toolGetSegmentByTime(
-    startTime: number,
-    endTime?: number
-  ): { success: boolean; data: unknown } {
+  private toolGetSegmentByTime(startTime: number, endTime?: number): { success: boolean; data: unknown } {
     const end = endTime || startTime + 60;
-    const segments = this.transcript.segments.filter(
-      s => s.startTime >= startTime && s.startTime <= end
-    );
+    const segments = this.transcript.segments.filter((s) => s.startTime >= startTime && s.startTime <= end);
 
-    const text = segments.map(s => `[${this.formatTime(s.startTime)}] [${s.speaker}]: ${s.text}`).join('\n');
+    const text = segments.map((s) => `[${this.formatTime(s.startTime)}] [${s.speaker}]: ${s.text}`).join('\n');
 
     return {
       success: true,
@@ -445,12 +442,9 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
     };
   }
 
-  private toolGetSpeakerSegments(
-    speaker: string,
-    limit: number = 10
-  ): { success: boolean; data: unknown } {
+  private toolGetSpeakerSegments(speaker: string, limit: number = 10): { success: boolean; data: unknown } {
     const segments = this.transcript.segments
-      .filter(s => s.speaker?.toLowerCase().includes(speaker.toLowerCase()))
+      .filter((s) => s.speaker?.toLowerCase().includes(speaker.toLowerCase()))
       .slice(0, limit);
 
     const totalDuration = segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
@@ -461,7 +455,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
         speaker,
         segmentCount: segments.length,
         totalSpeakingTime: Math.round(totalDuration),
-        segments: segments.map(s => ({
+        segments: segments.map((s) => ({
           time: this.formatTime(s.startTime),
           text: s.text,
         })),
@@ -471,10 +465,11 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
 
   private toolVerifyClaim(claim: string): { success: boolean; data: unknown } {
     // Extract key words from claim
-    const keywords = claim.toLowerCase()
+    const keywords = claim
+      .toLowerCase()
       .replace(/[^\w\s]/g, '')
       .split(/\s+/)
-      .filter(w => w.length > 3);
+      .filter((w) => w.length > 3);
 
     // Search for evidence
     const evidence: Array<{
@@ -486,7 +481,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
 
     for (const segment of this.transcript.segments) {
       const segmentLower = segment.text.toLowerCase();
-      const matchCount = keywords.filter(kw => segmentLower.includes(kw)).length;
+      const matchCount = keywords.filter((kw) => segmentLower.includes(kw)).length;
       const matchRatio = matchCount / keywords.length;
 
       if (matchRatio >= 0.3) {
@@ -505,16 +500,21 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
       return order[a.relevance] - order[b.relevance];
     });
 
-    const verified = evidence.some(e => e.relevance === 'strong');
+    const verified = evidence.some((e) => e.relevance === 'strong');
 
     return {
       success: true,
       data: {
         claim,
         verified,
-        confidence: evidence.length === 0 ? 'not_found' :
-          evidence[0].relevance === 'strong' ? 'high' :
-          evidence[0].relevance === 'moderate' ? 'medium' : 'low',
+        confidence:
+          evidence.length === 0
+            ? 'not_found'
+            : evidence[0].relevance === 'strong'
+              ? 'high'
+              : evidence[0].relevance === 'moderate'
+                ? 'medium'
+                : 'low',
         evidenceCount: evidence.length,
         topEvidence: evidence.slice(0, 3),
       },
@@ -537,7 +537,7 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
     // Calculate topic changes (rough estimate based on pauses or speaker changes)
     let topicChanges = 0;
     for (let i = 1; i < this.transcript.segments.length; i++) {
-      const gap = this.transcript.segments[i].startTime - this.transcript.segments[i-1].endTime;
+      const gap = this.transcript.segments[i].startTime - this.transcript.segments[i - 1].endTime;
       if (gap > 5) topicChanges++; // 5 second gap suggests topic change
     }
 
@@ -577,9 +577,6 @@ Commence par explorer le transcript avec les outils disponibles, puis produis un
 }
 
 // Factory function
-export function createClaudeSummaryAgent(options?: {
-  apiKey?: string;
-  maxIterations?: number;
-}): ClaudeSummaryAgent {
+export function createClaudeSummaryAgent(options?: { apiKey?: string; maxIterations?: number }): ClaudeSummaryAgent {
   return new ClaudeSummaryAgent(options);
 }

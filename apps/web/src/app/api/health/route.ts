@@ -81,6 +81,6 @@ export async function GET() {
       services,
       timestamp: new Date().toISOString(),
     },
-    { status: statusCode }
+    { status: statusCode },
   );
 }

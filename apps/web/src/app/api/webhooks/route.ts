@@ -50,10 +50,7 @@ export async function GET(request: NextRequest) {
     }
   } catch (error) {
     console.error('Error fetching webhooks:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch webhooks' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch webhooks' }, { status: 500 });
   }
 }
 
@@ -87,17 +84,14 @@ export async function POST(request: NextRequest) {
 
     // Validate events
     if (!events || !Array.isArray(events) || events.length === 0) {
-      return NextResponse.json(
-        { error: 'events must be a non-empty array of event types' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'events must be a non-empty array of event types' }, { status: 400 });
     }
 
     for (const event of events) {
       if (event !== '*' && !VALID_EVENTS.has(event)) {
         return NextResponse.json(
           { error: `Invalid event type: ${event}. Valid types: ${Array.from(VALID_EVENTS).join(', ')}` },
-          { status: 400 }
+          { status: 400 },
         );
       }
     }
@@ -116,25 +110,25 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      return NextResponse.json({
-        id: webhook.id,
-        url: webhook.url,
-        events: webhook.events,
-        secret: webhookSecret, // Only returned on creation
-        isActive: webhook.isActive,
-        createdAt: webhook.createdAt,
-      }, { status: 201 });
+      return NextResponse.json(
+        {
+          id: webhook.id,
+          url: webhook.url,
+          events: webhook.events,
+          secret: webhookSecret, // Only returned on creation
+          isActive: webhook.isActive,
+          createdAt: webhook.createdAt,
+        },
+        { status: 201 },
+      );
     } catch {
       return NextResponse.json(
         { error: 'Webhook model is not available. Please ensure database schema is up to date.' },
-        { status: 503 }
+        { status: 503 },
       );
     }
   } catch (error) {
     console.error('Error creating webhook:', error);
-    return NextResponse.json(
-      { error: 'Failed to create webhook' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create webhook' }, { status: 500 });
   }
 }
