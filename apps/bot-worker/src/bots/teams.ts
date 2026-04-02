@@ -148,10 +148,12 @@ export class TeamsBot extends BaseMeetingBot {
 
           for (const { keyword, change } of endSignals) {
             if (payload.includes(keyword)) {
-              // Ignore participantRemoved before the bot has joined —
-              // this fires when OTHER participants leave/join while we
-              // are still in the lobby, causing a premature exit.
-              if (keyword === 'participantRemoved' && !this.joinedSuccessfully) {
+              // Ignore ALL end signals before the bot has joined.
+              // During pre-join and lobby, Teams WebSocket sends callEnd /
+              // conversationEnd from previous sessions or other participants,
+              // which poison meetingSignal and cause premature exit once
+              // the bot actually joins.
+              if (!this.joinedSuccessfully) {
                 logger.info(
                   `Ignoring "${keyword}" WebSocket signal (bot not yet in meeting)`,
                 );
@@ -376,6 +378,10 @@ export class TeamsBot extends BaseMeetingBot {
 
     this.joinedSuccessfully = true;
     this.joinedAt = new Date();
+    // Clear any stale meetingSignal from pre-join/lobby WebSocket frames
+    // (e.g., callEnd from a previous session) that would otherwise cause
+    // checkMeetingEnded() to immediately return true.
+    this.meetingSignal = null;
     logger.info('Successfully joined Teams meeting');
     await this.takeDebugScreenshot('07_joined_successfully');
 
