@@ -2,6 +2,9 @@ import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { QUEUE_NAMES } from '@aramis/shared';
 
+// BullMQ prefix — matches Kasar conventions (dev: / prod:)
+const BULLMQ_PREFIX = process.env.BULLMQ_PREFIX || 'bull';
+
 // Redis connection (singleton)
 let redis: IORedis | null = null;
 
@@ -21,6 +24,7 @@ export function getMeetingBotQueue(): Queue {
   if (!queues[QUEUE_NAMES.MEETING_BOT]) {
     queues[QUEUE_NAMES.MEETING_BOT] = new Queue(QUEUE_NAMES.MEETING_BOT, {
       connection: getRedisConnection(),
+      prefix: BULLMQ_PREFIX,
     });
   }
   return queues[QUEUE_NAMES.MEETING_BOT];
@@ -30,6 +34,7 @@ export function getTranscriptionQueue(): Queue {
   if (!queues[QUEUE_NAMES.TRANSCRIPTION]) {
     queues[QUEUE_NAMES.TRANSCRIPTION] = new Queue(QUEUE_NAMES.TRANSCRIPTION, {
       connection: getRedisConnection(),
+      prefix: BULLMQ_PREFIX,
     });
   }
   return queues[QUEUE_NAMES.TRANSCRIPTION];

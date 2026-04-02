@@ -45,7 +45,7 @@ function generateSignature(timestamp: string, payloadJson: string, secret: strin
   return `sha256=${hmac}`;
 }
 
-export function createWebhookDeliveryWorker(redis: IORedis) {
+export function createWebhookDeliveryWorker(redis: IORedis, prefix = 'bull') {
   const worker = new Worker<WebhookDeliveryJobData>(
     QUEUE_NAMES.WEBHOOK_DELIVERY,
     async (job) => {
@@ -118,7 +118,7 @@ export function createWebhookDeliveryWorker(redis: IORedis) {
         logger.info(`Scheduling retry ${nextAttempt}/${maxAttempts} for webhook ${webhookId} in ${delay / 1000}s`);
 
         // Re-queue with delay for next attempt
-        const retryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: redis });
+        const retryQueue = new Queue(QUEUE_NAMES.WEBHOOK_DELIVERY, { connection: redis, prefix });
         try {
           await retryQueue.add(
             'deliver',
@@ -144,6 +144,7 @@ export function createWebhookDeliveryWorker(redis: IORedis) {
     },
     {
       connection: redis,
+      prefix,
       concurrency: parseInt(process.env.WEBHOOK_CONCURRENCY || '5'),
     },
   );

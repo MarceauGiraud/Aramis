@@ -184,7 +184,7 @@ async function processSummaryJob(data: SummaryJobData): Promise<void> {
 
 // -- Worker setup -----------------------------------------------------------
 
-export function createSummaryWorker(redis: IORedis): Worker {
+export function createSummaryWorker(redis: IORedis, prefix = 'bull'): Worker {
   const worker = new Worker(
     QUEUE_NAMES.SUMMARY,
     async (job) => {
@@ -192,6 +192,7 @@ export function createSummaryWorker(redis: IORedis): Worker {
     },
     {
       connection: redis,
+      prefix,
       concurrency: parseInt(process.env.SUMMARY_CONCURRENCY || '1', 10),
     },
   );

@@ -33,7 +33,10 @@ const redisSub = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', 
 
 // --- Shared resources ---
 
-const transcriptionQueue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: redis });
+// BullMQ prefix — matches Kasar conventions (dev: / prod:)
+const BULLMQ_PREFIX = process.env.BULLMQ_PREFIX || 'bull';
+
+const transcriptionQueue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: redis, prefix: BULLMQ_PREFIX });
 const workerId = `worker-${process.pid}-${Date.now()}`;
 const httpServer = createHttpServer(workerId);
 const wsServer = new AudioWebSocketServer();
@@ -56,6 +59,7 @@ const jobHandlerDeps = { redis, redisSub, transcriptionQueue, wsServer, webhookD
 const meetingWorker = new Worker(QUEUE_NAMES.MEETING_BOT, (job) => processMeetingJob(job, jobHandlerDeps), {
   connection: redis,
   concurrency: parseInt(process.env.BOT_CONCURRENCY || '2'),
+  prefix: BULLMQ_PREFIX,
 });
 
 meetingWorker.on('completed', (job) => {
@@ -66,14 +70,14 @@ meetingWorker.on('failed', (job, err) => {
   logger.error(`Job ${job?.id} failed: ${err.message}`);
 });
 
-const transcriptionWorker = createTranscriptionWorker(redis);
+const transcriptionWorker = createTranscriptionWorker(redis, BULLMQ_PREFIX);
 logger.info('Transcription worker started and listening for jobs');
 
-const summaryWorker = createSummaryWorker(redis);
+const summaryWorker = createSummaryWorker(redis, BULLMQ_PREFIX);
 logger.info('Summary worker started and listening for jobs');
 
-const webhookDeliveryWorker = createWebhookDeliveryWorker(redis);
-const calendarSyncWorker = createCalendarSyncWorker(redis);
+const webhookDeliveryWorker = createWebhookDeliveryWorker(redis, BULLMQ_PREFIX);
+const calendarSyncWorker = createCalendarSyncWorker(redis, BULLMQ_PREFIX);
 
 // --- Initialize services ---
 
@@ -94,7 +98,7 @@ async function initialize() {
 
   // Set up calendar sync repeatable job
   try {
-    await setupCalendarSyncRepeatable(redis);
+    await setupCalendarSyncRepeatable(redis, BULLMQ_PREFIX);
   } catch (error) {
     logger.warn(`Failed to set up calendar sync: ${error}`);
   }

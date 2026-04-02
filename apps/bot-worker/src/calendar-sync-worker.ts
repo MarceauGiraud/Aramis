@@ -21,8 +21,8 @@ export interface CalendarSyncJobData {
   calendarId?: string;
 }
 
-export function createCalendarSyncWorker(redis: IORedis) {
-  const meetingQueue = new Queue(QUEUE_NAMES.MEETING_BOT, { connection: redis });
+export function createCalendarSyncWorker(redis: IORedis, prefix = 'bull') {
+  const meetingQueue = new Queue(QUEUE_NAMES.MEETING_BOT, { connection: redis, prefix });
 
   const worker = new Worker<CalendarSyncJobData>(
     QUEUE_NAMES.CALENDAR_SYNC,
@@ -92,6 +92,7 @@ export function createCalendarSyncWorker(redis: IORedis) {
     },
     {
       connection: redis,
+      prefix,
       concurrency: 1, // Only one sync at a time
     },
   );
@@ -232,8 +233,8 @@ async function autoCreateMeetings(calendarId: string, userId: string, meetingQue
 /**
  * Set up the repeatable calendar sync job (every 5 minutes).
  */
-export async function setupCalendarSyncRepeatable(redis: IORedis): Promise<void> {
-  const queue = new Queue(QUEUE_NAMES.CALENDAR_SYNC, { connection: redis });
+export async function setupCalendarSyncRepeatable(redis: IORedis, prefix = 'bull'): Promise<void> {
+  const queue = new Queue(QUEUE_NAMES.CALENDAR_SYNC, { connection: redis, prefix });
 
   // Add repeatable job every 5 minutes
   await queue.add(

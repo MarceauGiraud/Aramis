@@ -27,7 +27,7 @@ export interface TranscriptionJobData {
   speakerHistory?: DomSpeakerEvent[];
 }
 
-export function createTranscriptionWorker(redis: IORedis) {
+export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
   const worker = new Worker<TranscriptionJobData>(
     QUEUE_NAMES.TRANSCRIPTION,
     async (job) => {
@@ -208,7 +208,7 @@ export function createTranscriptionWorker(redis: IORedis) {
         if (result.segments.length === 0) {
           logger.warn(`Batch transcription produced 0 segments for ${meetingId} — skipping summary`);
         } else {
-          const summaryQueue = new Queue(QUEUE_NAMES.SUMMARY, { connection: redis });
+          const summaryQueue = new Queue(QUEUE_NAMES.SUMMARY, { connection: redis, prefix });
           await summaryQueue.add('generate-summary', {
             meetingId,
             transcriptId: transcript.id,
@@ -243,6 +243,7 @@ export function createTranscriptionWorker(redis: IORedis) {
     {
       connection: redis,
       concurrency: parseInt(process.env.TRANSCRIPTION_CONCURRENCY || '2'),
+      prefix,
     },
   );
 
