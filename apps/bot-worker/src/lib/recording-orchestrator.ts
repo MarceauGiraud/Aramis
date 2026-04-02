@@ -1,19 +1,22 @@
 /**
  * RecordingOrchestrator
  *
- * Coordinates video capture, audio capture, and upload for the Aramis meeting recorder.
+ * Coordinates video+audio capture and upload for the Aramis meeting recorder.
  *
- * Architecture:
- * - Video is captured via FFmpeg from Xvfb (X11 display)
- * - Audio is captured via FFmpeg from PulseAudio
- * - Chunks are uploaded to S3 as they are recorded (live upload)
- * - At the end, transcription is triggered
+ * Architecture (two-process A/V):
+ * - Video FFmpeg: x11grab -> video-only MP4/WebM file
+ * - Audio FFmpeg: PulseAudio -> 48kHz stereo WAV file + 16kHz mono PCM on pipe:1
+ *   The pipe:1 feeds the PassThrough stream for live transcription (Deepgram/WebSocket).
+ * - After recording stops, a merge step combines video + audio into the final file.
+ * - The 48kHz WAV is kept for transcription upload (or a 16kHz mono WAV is extracted).
  *
  * Features:
  * - Pause/Resume recording via SIGSTOP/SIGCONT
  * - Multiple formats: WebM (VP9), MP4 (H.264), MP3 (audio-only)
  * - Configurable resolution
- * - Live audio stream for transcription/WebSocket via tee muxer
+ * - Live audio stream for transcription/WebSocket
+ * - NVENC GPU acceleration when available
+ * - ChunkUploader watches the video file during recording for live S3 upload
  *
  * Events:
  * - 'chunk-uploaded': Emitted when a chunk is uploaded to S3
@@ -30,8 +33,36 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { logger } from './logger';
 import { isS3Configured } from './s3-config';
+import { ChunkUploader } from './chunk-uploader';
 import { FORMAT_CONFIG, RESOLUTION_MAP } from '@aramis/shared';
 import type { RecordingFormat, Resolution } from '@aramis/shared';
+
+// ============================================================================
+// GPU Detection
+// ============================================================================
+
+let _gpuAvailable: boolean | null = null;
+
+/**
+ * Check if NVIDIA GPU encoding (NVENC) is available.
+ * Runs a tiny test encode to confirm the hardware is actually usable.
+ * Result is cached for the process lifetime.
+ */
+function isNvencAvailable(): boolean {
+  if (_gpuAvailable !== null) return _gpuAvailable;
+  try {
+    execSync('ffmpeg -y -f lavfi -i nullsrc=s=16x16:d=0.1 -c:v h264_nvenc -f null - 2>/dev/null', {
+      timeout: 5000,
+      stdio: 'pipe',
+    });
+    _gpuAvailable = true;
+    logger.info('NVENC GPU encoding available — using hardware acceleration');
+  } catch {
+    _gpuAvailable = false;
+    logger.info('NVENC not available — using software encoding');
+  }
+  return _gpuAvailable;
+}
 
 // ============================================================================
 // Types and Interfaces
@@ -62,6 +93,8 @@ export interface RecordingOrchestratorConfig {
   format?: RecordingFormat;
   /** Resolution preset key */
   resolutionPreset?: Resolution;
+  /** Video capture mode: 'x11grab' for screen capture, 'webrtc' for browser MediaRecorder */
+  captureMode?: 'x11grab' | 'webrtc';
 }
 
 export interface PauseEvent {
@@ -76,11 +109,15 @@ export interface RecordingInfo {
   startTime: Date | null;
   endTime: Date | null;
   duration: number;
+  /** Path to the video-only file (MP4/WebM) */
   videoPath: string | null;
+  /** Path to the 48kHz stereo WAV audio file */
   audioPath: string | null;
+  /** Path to the merged A/V file produced after recording stops */
   mergedPath: string | null;
   s3VideoUrl: string | null;
   s3AudioUrl: string | null;
+  /** S3 URL of the merged A/V file */
   s3MergedUrl: string | null;
   chunksUploaded: number;
   errors: string[];
@@ -95,7 +132,6 @@ export type RecordingStatus =
   | 'recording'
   | 'paused'
   | 'stopping'
-  | 'merging'
   | 'uploading'
   | 'complete'
   | 'error';
@@ -111,8 +147,11 @@ export interface ChunkUploadedEvent {
 export interface RecordingCompleteEvent {
   meetingId: string;
   duration: number;
+  /** URL of the video file */
   videoUrl: string | null;
+  /** URL of the audio file for transcription */
   audioUrl: string | null;
+  /** URL of the merged A/V file */
   mergedUrl: string | null;
   format: RecordingFormat;
 }
@@ -134,13 +173,24 @@ export class RecordingOrchestrator extends EventEmitter {
   private endTime: Date | null = null;
 
   // FFmpeg processes
+  /** Video FFmpeg: x11grab -> video-only file */
   private videoProcess: ChildProcess | null = null;
+  /** Audio FFmpeg: pulse -> WAV file + pipe:1 for live transcription */
   private audioProcess: ChildProcess | null = null;
 
   // Output paths
+  /** Path to the video-only file (MP4/WebM) */
   private videoPath: string | null = null;
+  /** Path to the 48kHz stereo WAV audio file */
   private audioPath: string | null = null;
+  /** Path to the merged A/V file (produced after recording stops) */
   private mergedPath: string | null = null;
+  /** Alias for mergedPath (backward compatibility) */
+  private get combinedPath(): string | null {
+    return this.mergedPath;
+  }
+  /** Path to 16kHz mono WAV extracted for transcription upload */
+  private transcriptionAudioPath: string | null = null;
 
   // S3 URLs
   private s3VideoUrl: string | null = null;
@@ -153,6 +203,10 @@ export class RecordingOrchestrator extends EventEmitter {
 
   // Error tracking
   private errors: string[] = [];
+  private audioFailed = false;
+
+  // Browser chrome height (measured dynamically, default 80px)
+  private chromeHeight = 80;
 
   // S3 client
   private s3Client: S3Client | null = null;
@@ -163,7 +217,10 @@ export class RecordingOrchestrator extends EventEmitter {
   private currentPauseStart: Date | null = null;
 
   // Format config
-  private formatConfig: typeof FORMAT_CONFIG[RecordingFormat];
+  private formatConfig: (typeof FORMAT_CONFIG)[RecordingFormat];
+
+  // Live chunked upload
+  private chunkUploader: ChunkUploader | null = null;
 
   // Audio stream fork for live consumers (transcription, WebSocket)
   private audioStreamPassthrough: PassThrough | null = null;
@@ -193,6 +250,7 @@ export class RecordingOrchestrator extends EventEmitter {
       s3KeyPrefix: config.s3KeyPrefix ?? 'recordings',
       format,
       resolutionPreset: config.resolutionPreset ?? '1080p',
+      captureMode: config.captureMode ?? 'x11grab',
     };
 
     // Initialize S3 client if configured
@@ -240,36 +298,52 @@ export class RecordingOrchestrator extends EventEmitter {
     const timestamp = Date.now();
     const ext = this.formatConfig.ext;
 
-    // For MP3 format, skip video entirely
     if (this.config.format === 'mp3') {
-      this.videoPath = null;
-      this.audioPath = path.join(
-        this.config.tempDir,
-        `${this.config.meetingId}_${timestamp}_audio.${ext}`
-      );
-      this.mergedPath = null;
+      // Audio-only: no video file, audioPath doubles as the main output
+      this.audioPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_audio.${ext}`);
     } else {
-      this.videoPath = path.join(
-        this.config.tempDir,
-        `${this.config.meetingId}_${timestamp}_video.${ext}`
-      );
-      this.audioPath = path.join(
-        this.config.tempDir,
-        `${this.config.meetingId}_${timestamp}_audio.wav`
-      );
-      this.mergedPath = path.join(
-        this.config.tempDir,
-        `${this.config.meetingId}_${timestamp}_merged.${ext}`
-      );
+      // In WebRTC mode, the browser sends WebM regardless of the configured format
+      const videoExt = this.config.captureMode === 'webrtc' ? 'webm' : ext;
+      // Video-only file (will be merged with audio after recording)
+      this.videoPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_video.${videoExt}`);
+      // 48kHz stereo WAV for the audio track
+      this.audioPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_audio.wav`);
+      // Merged A/V file (produced after recording stops)
+      this.mergedPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_merged.${videoExt}`);
     }
+
+    // 16kHz mono WAV for transcription upload (extracted from audio WAV after recording)
+    this.transcriptionAudioPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_audio_16k.wav`);
 
     try {
       if (this.config.format === 'mp3') {
         // Audio-only recording
+        await this.startAudioOnlyCapture();
+      } else if (this.config.captureMode === 'webrtc') {
+        // WebRTC mode: video comes from browser MediaRecorder via WebSocket
+        // Only start audio capture (PulseAudio), video file will be written by WebRTC handler
+        logger.info('WebRTC capture mode: skipping FFmpeg video, waiting for browser video chunks');
         await this.startAudioCapture();
       } else {
-        // Start video and audio capture in parallel
+        // x11grab mode: FFmpeg captures both video and audio from the display
         await Promise.all([this.startVideoCapture(), this.startAudioCapture()]);
+      }
+
+      // Start live chunked upload on the VIDEO file if enabled and S3 is configured.
+      // The video file is written in real-time by FFmpeg, so ChunkUploader can watch it.
+      // For webrtc mode, ChunkUploader is started when the first video chunk arrives.
+      if (this.config.captureMode !== 'webrtc' && this.config.enableLiveUpload && this.s3Client && this.videoPath) {
+        try {
+          this.chunkUploader = new ChunkUploader({
+            uploadIntervalMs: (this.config.chunkDurationSec || 30) * 1000,
+            contentType: this.formatConfig.mime,
+          });
+          await this.chunkUploader.start(this.videoPath, this.config.meetingId);
+          logger.info('Live chunked upload started (watching video file)');
+        } catch (err) {
+          logger.warn(`Failed to start chunk uploader, will fall back to full upload: ${err}`);
+          this.chunkUploader = null;
+        }
       }
 
       this.status = 'recording';
@@ -353,10 +427,17 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   /**
+   * Check if audio capture is (or was) active and healthy.
+   * Returns false if the audio FFmpeg process exited with an error.
+   */
+  hasAudio(): boolean {
+    return !this.audioFailed && this.audioProcess !== null;
+  }
+
+  /**
    * Stop recording and finalize outputs
    *
    * @param options - Options for stopping
-   * @param options.merge - Whether to merge audio and video (default: true)
    * @param options.upload - Whether to upload to S3 (default: true if S3 configured)
    * @param options.cleanup - Whether to cleanup temp files after upload (default: true)
    */
@@ -365,9 +446,13 @@ export class RecordingOrchestrator extends EventEmitter {
       merge?: boolean;
       upload?: boolean;
       cleanup?: boolean;
-    } = {}
+      /** Trim this many seconds from the start of the recording (waiting room frames) */
+      trimStartSeconds?: number;
+      /** Trim the recording to this duration (seconds) after start trim — removes trailing frames after meeting ended */
+      trimEndSeconds?: number;
+    } = {},
   ): Promise<RecordingInfo> {
-    const { merge = true, upload = true, cleanup = true } = options;
+    const { upload = true, cleanup = true } = options;
 
     if (this.status !== 'recording' && this.status !== 'paused') {
       throw new Error(`Cannot stop recording: current status is '${this.status}'`);
@@ -385,23 +470,68 @@ export class RecordingOrchestrator extends EventEmitter {
     logger.info(`Stopping recording for meeting: ${this.config.meetingId}`);
 
     try {
-      // Stop video and audio capture
+      // Stop FFmpeg processes
+      logger.info('Stopping FFmpeg capture processes');
       if (this.config.format === 'mp3') {
-        await this.stopAudioCapture();
+        await this.stopProcess(this.audioProcess, 'audio');
+        this.audioProcess = null;
       } else {
-        await Promise.all([this.stopVideoCapture(), this.stopAudioCapture()]);
+        await Promise.all([this.stopProcess(this.videoProcess, 'video'), this.stopProcess(this.audioProcess, 'audio')]);
+        this.videoProcess = null;
+        this.audioProcess = null;
+      }
+      logger.info('FFmpeg capture processes stopped');
+
+      // Merge video + audio into the final file (skip if audio capture failed)
+      if (this.config.format !== 'mp3' && !this.audioFailed) {
+        try {
+          await this.mergeAudioVideo(options.trimStartSeconds, options.trimEndSeconds);
+        } catch (error) {
+          logger.error('Merge failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // Non-fatal for upload: video file can still be uploaded separately
+          this.mergedPath = null;
+        }
+      } else if (this.audioFailed && this.config.format !== 'mp3') {
+        logger.warn('Audio capture failed — skipping merge and audio extraction');
       }
 
-      // Merge audio and video if requested (not for mp3)
-      if (merge && this.config.format !== 'mp3' && this.videoPath && this.audioPath) {
-        this.status = 'merging';
-        await this.mergeAudioVideo();
+      // Extract 16kHz mono WAV from the audio file for transcription upload.
+      // The audio WAV is 48kHz stereo; we need 16kHz mono for transcription
+      // services (Deepgram, AssemblyAI).
+      if (this.config.format !== 'mp3' && !this.audioFailed) {
+        try {
+          await this.extractTranscriptionAudio();
+        } catch (error) {
+          // Non-fatal: transcription can still work from the audio WAV
+          logger.warn('Transcription audio extraction failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          this.transcriptionAudioPath = null;
+        }
+      }
+
+      // Finalize live chunked upload if active
+      if (this.chunkUploader) {
+        try {
+          const s3Url = await this.chunkUploader.stop();
+          this.s3VideoUrl = s3Url;
+          logger.info('Live chunked upload finalized');
+        } catch (err) {
+          logger.warn(`Chunk uploader finalize failed, falling back to full upload: ${err}`);
+          this.chunkUploader = null; // fall through to full upload
+        }
       }
 
       // Upload to S3 if requested and configured
       if (upload && this.s3Client) {
         this.status = 'uploading';
+        logger.info('Starting S3 upload of final recordings');
         await this.uploadFinalRecordings();
+        logger.info('S3 upload complete');
+      } else {
+        logger.info(`S3 upload skipped (upload=${upload}, s3Configured=${!!this.s3Client})`);
       }
 
       // Cleanup temp files if requested
@@ -472,6 +602,86 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   /**
+   * Get the recording start time.
+   */
+  getStartTime(): Date | null {
+    return this.startTime;
+  }
+
+  /**
+   * Write a WebRTC video chunk (WebM data from browser MediaRecorder).
+   * Called by the WebSocket server when it receives type=200 messages.
+   */
+  writeWebRTCVideoChunk(chunk: Buffer): void {
+    if (!this.videoPath) {
+      // Generate video path if not already set
+      const timestamp = Date.now();
+      this.videoPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_video.webm`);
+      this.mergedPath = path.join(this.config.tempDir, `${this.config.meetingId}_${timestamp}_merged.webm`);
+    }
+
+    try {
+      fs.appendFileSync(this.videoPath, chunk);
+    } catch (error) {
+      logger.warn(`Failed to write WebRTC video chunk: ${error}`);
+    }
+
+    // Start ChunkUploader on first chunk if not already started
+    if (!this.chunkUploader && this.config.enableLiveUpload && this.s3Client) {
+      try {
+        this.chunkUploader = new ChunkUploader({
+          uploadIntervalMs: (this.config.chunkDurationSec || 30) * 1000,
+          contentType: 'video/webm',
+        });
+        this.chunkUploader.start(this.videoPath, this.config.meetingId);
+        logger.info('WebRTC video: ChunkUploader started');
+      } catch (err) {
+        logger.warn(`Failed to start chunk uploader for WebRTC video: ${err}`);
+      }
+    }
+  }
+
+  /**
+   * Set the measured browser chrome height (address bar + tabs).
+   * Used by the crop filter to remove the toolbar from recordings.
+   */
+  setChromeHeight(height: number): void {
+    this.chromeHeight = height;
+  }
+
+  /**
+   * Reset orchestrator state so it can be started again (for recording rotation).
+   * Must be called after stop() and before start().
+   */
+  reset(): void {
+    if (this.status !== 'complete' && this.status !== 'error') {
+      throw new Error(`Cannot reset orchestrator in state: ${this.status}`);
+    }
+    this.status = 'idle';
+    this.videoProcess = null;
+    this.audioProcess = null;
+    this.chunkUploader = null;
+    this.videoPath = null;
+    this.audioPath = null;
+    this.transcriptionAudioPath = null;
+    this.mergedPath = null;
+    this.startTime = null;
+    this.endTime = null;
+    this.s3VideoUrl = null;
+    this.s3AudioUrl = null;
+    this.s3MergedUrl = null;
+    this.chunksUploaded = 0;
+    this.chunkIndex = 0;
+    this.errors = [];
+    this.audioFailed = false;
+    this.pauseEvents = [];
+    this.totalPauseDurationMs = 0;
+    this.currentPauseStart = null;
+    this.audioStreamPassthrough = null;
+    logger.info('Recording orchestrator reset for new segment');
+  }
+
+  /**
    * Get recording duration in seconds, subtracting pause time
    */
   getDuration(): number {
@@ -509,14 +719,32 @@ export class RecordingOrchestrator extends EventEmitter {
   async forceCleanup(): Promise<void> {
     logger.warn(`Force cleanup initiated for meeting: ${this.config.meetingId}`);
 
+    // Abort chunk uploader if active
+    if (this.chunkUploader) {
+      try {
+        await this.chunkUploader.abortUpload();
+      } catch {
+        /* ignore */
+      }
+      this.chunkUploader = null;
+    }
+
     // Resume if paused before killing (SIGKILL on stopped process may not work)
     if (this.videoProcess && !this.videoProcess.killed) {
-      try { this.videoProcess.kill('SIGCONT'); } catch { /* ignore */ }
+      try {
+        this.videoProcess.kill('SIGCONT');
+      } catch {
+        /* ignore */
+      }
       this.videoProcess.kill('SIGKILL');
       this.videoProcess = null;
     }
     if (this.audioProcess && !this.audioProcess.killed) {
-      try { this.audioProcess.kill('SIGCONT'); } catch { /* ignore */ }
+      try {
+        this.audioProcess.kill('SIGCONT');
+      } catch {
+        /* ignore */
+      }
       this.audioProcess.kill('SIGKILL');
       this.audioProcess = null;
     }
@@ -539,10 +767,7 @@ export class RecordingOrchestrator extends EventEmitter {
 
     const { width, height } = this.config.resolution;
     try {
-      execSync(
-        `xrandr --display ${this.config.display} -s ${width}x${height}`,
-        { timeout: 5000, stdio: 'pipe' }
-      );
+      execSync(`xrandr --display ${this.config.display} -s ${width}x${height}`, { timeout: 5000, stdio: 'pipe' });
       logger.info(`Display ${this.config.display} configured to ${width}x${height}`);
     } catch {
       // xrandr may not be available or mode may not exist; not fatal
@@ -551,30 +776,51 @@ export class RecordingOrchestrator extends EventEmitter {
   }
 
   // ==========================================================================
-  // Video Capture
+  // Video Capture (x11grab -> video-only file)
   // ==========================================================================
 
+  /**
+   * Start FFmpeg to capture video only from the X11 display.
+   * Produces a video-only file (no audio track).
+   */
   private async startVideoCapture(): Promise<void> {
     if (!this.videoPath) return;
-
-    logger.info(`Starting video capture from display ${this.config.display}`);
 
     const videoCodec = this.formatConfig.videoCodec;
     if (!videoCodec) return; // audio-only format
 
-    // Build codec-specific args
+    logger.info(`Starting video capture: display=${this.config.display}`);
+
+    // Build codec-specific video args (includes bitrate floor fix from Sprint 2)
     const codecArgs = this.getVideoCodecArgs(videoCodec);
 
+    // Xvfb is chromeHeight px taller than the target resolution to accommodate
+    // Chrome's toolbar. We capture the full display and crop out the top.
+    // chromeHeight is measured dynamically via window.outerHeight - window.innerHeight,
+    // plus a safety offset applied in base.ts to avoid browser chrome leaking through.
+    // Cap chrome height to avoid exceeding Xvfb display (which is resolution + 110)
+    const ch = Math.min(this.chromeHeight, 110);
+    const captureHeight = this.config.resolution.height + ch;
     const args = [
-      // Input from X11 display
-      '-f', 'x11grab',
-      '-video_size', `${this.config.resolution.width}x${this.config.resolution.height}`,
-      '-framerate', String(this.config.frameRate),
-      '-i', this.config.display,
+      '-y',
+      '-f',
+      'x11grab',
+      '-video_size',
+      `${this.config.resolution.width}x${captureHeight}`,
+      '-framerate',
+      String(this.config.frameRate),
+      '-draw_mouse',
+      '0',
+      '-i',
+      this.config.display,
+      // Crop out the browser chrome (top N pixels) to produce clean video
+      '-vf',
+      `crop=${this.config.resolution.width}:${this.config.resolution.height}:0:${ch}`,
       // Video encoding
       ...codecArgs,
-      // Output
-      '-y',
+      // No audio
+      '-an',
+      // Output video-only file
       this.videoPath,
     ];
 
@@ -587,7 +833,6 @@ export class RecordingOrchestrator extends EventEmitter {
 
       this.videoProcess.stderr?.on('data', (data) => {
         stderr += data.toString();
-        // Log progress periodically (FFmpeg outputs progress to stderr)
         if (stderr.includes('frame=')) {
           const match = stderr.match(/frame=\s*(\d+)/);
           if (match) {
@@ -625,106 +870,130 @@ export class RecordingOrchestrator extends EventEmitter {
    * Get FFmpeg video codec arguments based on format
    */
   private getVideoCodecArgs(codec: string): string[] {
+    const gpu = isNvencAvailable();
+
     switch (codec) {
       case 'libvpx-vp9':
+        // VP9: NVENC doesn't support VP9, always software
         return [
-          '-c:v', 'libvpx-vp9',
-          '-b:v', '2M',
-          '-crf', '30',
-          '-deadline', 'realtime',
-          '-cpu-used', '8',
+          '-c:v',
+          'libvpx-vp9',
+          '-b:v',
+          '1.5M',
+          '-crf',
+          '32',
+          '-deadline',
+          'realtime',
+          '-cpu-used',
+          '5',
+          '-row-mt',
+          '1',
+          '-tile-columns',
+          '2',
         ];
       case 'libx264':
+        if (gpu) {
+          // NVENC H.264: hardware-accelerated, much faster and lower CPU
+          // frag_keyframe+empty_moov: write moov atom at start so file is valid even if interrupted
+          return [
+            '-c:v',
+            'h264_nvenc',
+            '-preset',
+            'p4',
+            '-tune',
+            'll',
+            '-rc',
+            'vbr',
+            '-cq',
+            '28',
+            '-b:v',
+            '2M',
+            '-maxrate',
+            '3M',
+            '-bufsize',
+            '4M',
+            '-pix_fmt',
+            'yuv420p',
+            '-movflags',
+            'frag_keyframe+empty_moov',
+          ];
+        }
+        // frag_keyframe+empty_moov: write moov atom at start so file is always
+        // valid even if FFmpeg is killed mid-recording (crash resilience)
         return [
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-tune', 'zerolatency',
-          '-crf', '23',
-          '-pix_fmt', 'yuv420p',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-tune',
+          'zerolatency',
+          '-crf',
+          '28',
+          '-b:v',
+          '1500k',
+          '-minrate',
+          '500k',
+          '-maxrate',
+          '3000k',
+          '-bufsize',
+          '3000k',
+          '-pix_fmt',
+          'yuv420p',
+          '-movflags',
+          'frag_keyframe+empty_moov',
         ];
       default:
         return ['-c:v', codec];
     }
   }
 
-  private async stopVideoCapture(): Promise<void> {
-    const proc = this.videoProcess;
-    if (!proc) return;
-
-    logger.info('Stopping video capture');
-
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        logger.warn('Video capture did not stop gracefully, forcing kill');
-        proc.kill('SIGKILL');
-        resolve();
-      }, 10000);
-
-      proc.on('exit', () => {
-        clearTimeout(timeout);
-        this.videoProcess = null;
-        resolve();
-      });
-
-      // Send 'q' to FFmpeg to gracefully stop
-      proc.stdin?.write('q');
-      proc.stdin?.end();
-
-      // Also send SIGTERM as backup
-      setTimeout(() => {
-        if (!proc.killed) proc.kill('SIGTERM');
-      }, 1000);
-    });
-  }
-
   // ==========================================================================
-  // Audio Capture
+  // Audio Capture (PulseAudio -> WAV file + pipe:1 for live transcription)
   // ==========================================================================
 
+  /**
+   * Start FFmpeg to capture audio from PulseAudio. Uses filter_complex to split
+   * the audio into two outputs:
+   * 1. A 48kHz stereo WAV file on disk (for merging with video later)
+   * 2. A 16kHz mono PCM stream on pipe:1 (for live transcription / WebSocket)
+   */
   private async startAudioCapture(): Promise<void> {
     if (!this.audioPath) return;
 
     logger.info(`Starting audio capture from source ${this.config.audioSource}`);
 
-    // Create passthrough stream for live audio consumers
-    this.audioStreamPassthrough = new PassThrough();
+    // Create passthrough stream for live audio consumers (WebSocket + live transcription)
+    this.audioStreamPassthrough = new PassThrough({ highWaterMark: 64 * 1024 });
+    logger.info('Audio passthrough stream created for live consumers (WebSocket/transcription)');
 
-    let args: string[];
-
-    if (this.config.format === 'mp3') {
-      // MP3 audio-only output with tee muxer for live stream
-      // Tee outputs to both MP3 file and raw PCM on stdout for live consumers
-      const teeOutput = `[f=mp3]${this.audioPath}|[f=s16le]pipe:1`;
-      args = [
-        '-f', 'pulse',
-        '-i', this.config.audioSource,
-        '-c:a', 'libmp3lame',
-        '-b:a', this.formatConfig.mergeAudioBitrate,
-        '-ar', '44100',
-        '-ac', '2',
-        // Output via tee muxer to both file and stdout
-        '-f', 'tee',
-        '-y',
-        teeOutput,
-      ];
-    } else {
-      // WAV for transcription compatibility with tee muxer for live stream
-      // Use tee muxer to output to both file and stdout pipe for live consumers.
-      // FFmpeg tee format: -f tee "[f=wav]file.wav|[f=s16le]pipe:1"
-      // The pipe:1 output sends raw PCM to stdout for live transcription/WebSocket.
-      const teeOutput = `[f=wav]${this.audioPath}|[f=s16le]pipe:1`;
-      args = [
-        '-f', 'pulse',
-        '-i', this.config.audioSource,
-        '-c:a', 'pcm_s16le',
-        '-ar', '16000', // 16kHz sample rate (good for speech recognition)
-        '-ac', '1', // Mono channel
-        // Output via tee muxer to both file and stdout
-        '-f', 'tee',
-        '-y',
-        teeOutput,
-      ];
-    }
+    const args = [
+      '-y',
+      '-thread_queue_size',
+      '1024',
+      '-f',
+      'pulse',
+      '-i',
+      this.config.audioSource,
+      // Split audio into two streams: one for file, one for live transcription
+      '-filter_complex',
+      '[0:a]asplit=2[file][live];' +
+        '[file]aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo[fileout];' +
+        '[live]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[liveout]',
+      // Output 1: 48kHz stereo WAV file
+      '-map',
+      '[fileout]',
+      '-c:a',
+      'pcm_s16le',
+      this.audioPath,
+      // Output 2: 16kHz mono PCM on pipe:1 for live transcription
+      '-map',
+      '[liveout]',
+      '-c:a',
+      'pcm_s16le',
+      '-f',
+      's16le',
+      'pipe:1',
+    ];
 
     return new Promise((resolve, reject) => {
       this.audioProcess = spawn('ffmpeg', args, {
@@ -733,9 +1002,10 @@ export class RecordingOrchestrator extends EventEmitter {
 
       let stderr = '';
 
-      // Pipe stdout (raw PCM from tee) to the passthrough stream
+      // Pipe stdout (raw PCM 16kHz mono) to the passthrough stream
       if (this.audioProcess.stdout) {
         this.audioProcess.stdout.pipe(this.audioStreamPassthrough!);
+        logger.info('Audio FFmpeg piped to passthrough stream (PCM s16le 16kHz mono)');
       }
 
       this.audioProcess.stderr?.on('data', (data) => {
@@ -744,20 +1014,24 @@ export class RecordingOrchestrator extends EventEmitter {
 
       this.audioProcess.on('error', (error) => {
         logger.error(`Audio capture error: ${error.message}`);
-        this.emitError(error, 'audio-capture', true); // Audio errors are recoverable
+        this.emitError(error, 'audio-capture', false);
         reject(error);
       });
 
       this.audioProcess.on('exit', (code, signal) => {
         // End the passthrough stream when FFmpeg exits
         if (this.audioStreamPassthrough) {
+          logger.info('Audio FFmpeg exited, closing passthrough stream');
           this.audioStreamPassthrough.end();
         }
 
-        if (code !== 0 && signal !== 'SIGTERM' && signal !== 'SIGINT') {
+        // FFmpeg returns 255 when killed by SIGTERM (normal shutdown)
+        const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT' || code === 255;
+        if (!isNormalExit) {
+          this.audioFailed = true;
           const error = new Error(`Audio capture exited with code ${code}: ${stderr.slice(-500)}`);
           logger.error(error.message);
-          this.emitError(error, 'audio-capture', true);
+          this.emitError(error, 'audio-capture', false);
         }
       });
 
@@ -772,22 +1046,117 @@ export class RecordingOrchestrator extends EventEmitter {
     });
   }
 
-  private async stopAudioCapture(): Promise<void> {
-    const proc = this.audioProcess;
+  // ==========================================================================
+  // Audio-Only Capture (MP3 format)
+  // ==========================================================================
+
+  /**
+   * Start audio-only recording for MP3 format.
+   * Produces an MP3 file + 16kHz mono PCM on pipe:1 for live consumers.
+   */
+  private async startAudioOnlyCapture(): Promise<void> {
+    if (!this.audioPath) return;
+
+    logger.info(`Starting audio-only capture from source ${this.config.audioSource}`);
+
+    // Create passthrough stream for live audio consumers
+    this.audioStreamPassthrough = new PassThrough({ highWaterMark: 64 * 1024 });
+
+    const args = [
+      '-y',
+      '-thread_queue_size',
+      '1024',
+      '-f',
+      'pulse',
+      '-i',
+      this.config.audioSource,
+      '-filter_complex',
+      '[0:a]asplit=2[file][live];' +
+        '[file]aresample=44100,aformat=sample_fmts=s16:channel_layouts=stereo[fileout];' +
+        '[live]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[liveout]',
+      '-map',
+      '[fileout]',
+      '-c:a',
+      'libmp3lame',
+      '-b:a',
+      '192k',
+      this.audioPath,
+      '-map',
+      '[liveout]',
+      '-c:a',
+      'pcm_s16le',
+      '-f',
+      's16le',
+      'pipe:1',
+    ];
+
+    return new Promise((resolve, reject) => {
+      this.audioProcess = spawn('ffmpeg', args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stderr = '';
+
+      if (this.audioProcess.stdout) {
+        this.audioProcess.stdout.pipe(this.audioStreamPassthrough!);
+        logger.info('Audio-only FFmpeg piped to passthrough stream (PCM s16le 16kHz)');
+      }
+
+      this.audioProcess.stderr?.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      this.audioProcess.on('error', (error) => {
+        logger.error(`Audio-only capture error: ${error.message}`);
+        this.emitError(error, 'audio-capture', true);
+        reject(error);
+      });
+
+      this.audioProcess.on('exit', (code, signal) => {
+        if (this.audioStreamPassthrough) {
+          this.audioStreamPassthrough.end();
+        }
+        // FFmpeg returns 255 when killed by SIGTERM (normal shutdown)
+        const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT' || code === 255;
+        if (!isNormalExit) {
+          this.audioFailed = true;
+          const error = new Error(`Audio-only capture exited with code ${code}: ${stderr.slice(-500)}`);
+          logger.error(error.message);
+          this.emitError(error, 'audio-capture', true);
+        }
+      });
+
+      setTimeout(() => {
+        if (this.audioProcess && !this.audioProcess.killed) {
+          resolve();
+        } else {
+          reject(new Error('Audio-only capture failed to start'));
+        }
+      }, 500);
+    });
+  }
+
+  // ==========================================================================
+  // Process Stop Helper
+  // ==========================================================================
+
+  /**
+   * Gracefully stop an FFmpeg process by sending 'q', then SIGTERM, then SIGKILL.
+   */
+  private async stopProcess(proc: ChildProcess | null, label: string): Promise<void> {
     if (!proc) return;
 
-    logger.info('Stopping audio capture');
+    logger.info(`Stopping ${label} FFmpeg process`);
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        logger.warn('Audio capture did not stop gracefully, forcing kill');
+        logger.warn(`${label} FFmpeg did not stop gracefully, forcing kill`);
         proc.kill('SIGKILL');
         resolve();
       }, 10000);
 
       proc.on('exit', () => {
         clearTimeout(timeout);
-        this.audioProcess = null;
         resolve();
       });
 
@@ -806,48 +1175,62 @@ export class RecordingOrchestrator extends EventEmitter {
   // Audio/Video Merge
   // ==========================================================================
 
-  private async mergeAudioVideo(): Promise<void> {
+  /**
+   * Merge the video-only file and audio WAV into a single A/V file.
+   * Uses -c:v copy to avoid re-encoding the video stream.
+   */
+  private async mergeAudioVideo(trimStartSeconds?: number, trimEndSeconds?: number): Promise<void> {
     if (!this.videoPath || !this.audioPath || !this.mergedPath) {
-      throw new Error('Missing paths for merge operation');
+      logger.warn('Missing paths for merge, skipping');
+      return;
     }
 
-    // Verify input files exist
     if (!fs.existsSync(this.videoPath)) {
-      throw new Error(`Video file not found: ${this.videoPath}`);
+      throw new Error(`Video file not found for merge: ${this.videoPath}`);
     }
     if (!fs.existsSync(this.audioPath)) {
-      logger.warn(`Audio file not found, skipping merge: ${this.audioPath}`);
-      return;
+      throw new Error(`Audio file not found for merge: ${this.audioPath}`);
     }
 
-    logger.info('Merging audio and video');
+    const trimming = trimStartSeconds && trimStartSeconds > 0;
+    const trimmingEnd = trimEndSeconds && trimEndSeconds > 0;
+    logger.info(
+      `Merging video + audio -> ${this.mergedPath}` +
+        (trimming ? ` (trimming first ${trimStartSeconds!.toFixed(1)}s)` : '') +
+        (trimmingEnd ? ` (duration limited to ${trimEndSeconds!.toFixed(1)}s)` : ''),
+    );
 
-    const mergeAudioCodec = this.formatConfig.mergeAudioCodec;
-    const mergeAudioBitrate = this.formatConfig.mergeAudioBitrate;
+    const args: string[] = ['-y'];
 
-    if (!mergeAudioCodec) {
-      logger.warn('No merge audio codec configured for this format, skipping merge');
-      return;
+    // Input files (no -ss here; we use output-level -ss for frame-accurate seeking)
+    args.push('-i', this.videoPath);
+    args.push('-i', this.audioPath);
+
+    args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
+
+    // WebM containers require Opus audio; MP4 containers use AAC
+    const isWebM = this.mergedPath!.endsWith('.webm');
+    if (isWebM) {
+      args.push('-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-ac', '2');
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2');
+    }
+    args.push('-async', '1');
+
+    // Trim from start if requested (removes waiting room frames).
+    // Placed as an OUTPUT option (after -i) for frame-accurate seeking.
+    // As an input option, FFmpeg would seek to the nearest keyframe which
+    // can overshoot by several seconds with VP9/WebM sparse keyframes.
+    if (trimming) {
+      args.push('-ss', String(trimStartSeconds));
     }
 
-    const args = [
-      // Input video
-      '-i', this.videoPath,
-      // Input audio
-      '-i', this.audioPath,
-      // Map streams
-      '-map', '0:v:0',
-      '-map', '1:a:0',
-      // Copy video, encode audio per format
-      '-c:v', 'copy',
-      '-c:a', mergeAudioCodec,
-      '-b:a', mergeAudioBitrate,
-      // Sync audio
-      '-shortest',
-      // Output
-      '-y',
-      this.mergedPath,
-    ];
+    // Trim the end: limit output duration to remove trailing "bot alone" frames
+    if (trimmingEnd) {
+      args.push('-t', String(trimEndSeconds));
+    }
+
+    args.push('-shortest', this.mergedPath);
 
     return new Promise((resolve, reject) => {
       const mergeProcess = spawn('ffmpeg', args, {
@@ -862,18 +1245,95 @@ export class RecordingOrchestrator extends EventEmitter {
 
       mergeProcess.on('error', (error) => {
         logger.error(`Merge error: ${error.message}`);
-        this.emitError(error, 'merge', true);
+        this.emitError(error, 'merge', false);
         reject(error);
       });
 
       mergeProcess.on('exit', (code) => {
         if (code === 0) {
-          logger.info('Audio/video merge complete');
+          const videoSize = fs.statSync(this.videoPath!).size;
+          const audioSize = fs.statSync(this.audioPath!).size;
+          const mergedSize = fs.statSync(this.mergedPath!).size;
+          logger.info(
+            `Merge complete: video=${(videoSize / 1024 / 1024).toFixed(1)}MB, ` +
+              `audio=${(audioSize / 1024 / 1024).toFixed(1)}MB, ` +
+              `merged=${(mergedSize / 1024 / 1024).toFixed(1)}MB`,
+          );
           resolve();
         } else {
           const error = new Error(`Merge failed with code ${code}: ${stderr.slice(-500)}`);
           logger.error(error.message);
-          this.emitError(error, 'merge', true);
+          this.emitError(error, 'merge', false);
+          reject(error);
+        }
+      });
+    });
+  }
+
+  // ==========================================================================
+  // Transcription Audio Extraction
+  // ==========================================================================
+
+  /**
+   * Extract a 16kHz mono WAV from the 48kHz stereo audio WAV for transcription upload.
+   *
+   * The audio WAV is 48kHz stereo PCM. Transcription services (Deepgram, AssemblyAI)
+   * work best with 16kHz mono, and the smaller file size (~11MB for 10 minutes vs
+   * ~132MB) avoids S3 upload timeouts.
+   */
+  private async extractTranscriptionAudio(): Promise<void> {
+    if (!this.audioPath || !this.transcriptionAudioPath) {
+      return;
+    }
+
+    if (!fs.existsSync(this.audioPath)) {
+      logger.warn(`Audio file not found, skipping transcription audio extraction: ${this.audioPath}`);
+      return;
+    }
+
+    logger.info(`Extracting 16kHz mono audio for transcription: ${this.transcriptionAudioPath}`);
+
+    const args = [
+      '-y',
+      '-i',
+      this.audioPath,
+      '-vn', // discard any non-audio (safety)
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      this.transcriptionAudioPath,
+    ];
+
+    return new Promise((resolve, reject) => {
+      const extractProcess = spawn('ffmpeg', args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stderr = '';
+
+      extractProcess.stderr?.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      extractProcess.on('error', (error) => {
+        logger.error(`Transcription audio extraction error: ${error.message}`);
+        reject(error);
+      });
+
+      extractProcess.on('exit', (code) => {
+        if (code === 0) {
+          const sourceSize = fs.statSync(this.audioPath!).size;
+          const extractedSize = fs.statSync(this.transcriptionAudioPath!).size;
+          logger.info(
+            `Transcription audio extracted: source=${(sourceSize / 1024 / 1024).toFixed(1)}MB, 16kHz=${(extractedSize / 1024 / 1024).toFixed(1)}MB`,
+          );
+          resolve();
+        } else {
+          const error = new Error(`Transcription audio extraction failed with code ${code}: ${stderr.slice(-500)}`);
+          logger.error(error.message);
           reject(error);
         }
       });
@@ -894,34 +1354,42 @@ export class RecordingOrchestrator extends EventEmitter {
 
     if (this.config.format === 'mp3') {
       // Audio-only: upload the MP3 file
+      logger.info('Uploading audio-only recording (MP3)');
       if (this.audioPath && fs.existsSync(this.audioPath)) {
-        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', this.formatConfig.mimeType));
+        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', this.formatConfig.mime));
       }
     } else {
-      // Upload merged file if available, otherwise upload video and audio separately
+      // Upload the merged A/V file as the primary video output.
+      // This overwrites s3VideoUrl even if chunk uploader already uploaded the
+      // video-only file, because the merged file is the better final output.
       if (this.mergedPath && fs.existsSync(this.mergedPath)) {
-        uploadPromises.push(this.uploadFile(this.mergedPath, 'merged', this.formatConfig.mimeType));
-      } else {
-        // Upload video
-        if (this.videoPath && fs.existsSync(this.videoPath)) {
-          uploadPromises.push(this.uploadFile(this.videoPath, 'video', this.formatConfig.mimeType));
-        }
+        logger.info('Uploading merged A/V file');
+        uploadPromises.push(
+          this.uploadFile(this.mergedPath, 'video', this.formatConfig.mime).then(() => {
+            this.s3MergedUrl = this.s3VideoUrl;
+          }),
+        );
+      } else if (!this.s3VideoUrl && this.videoPath && fs.existsSync(this.videoPath)) {
+        // Fallback: if merge failed and chunk uploader didn't upload, upload video-only
+        logger.info('Merge not available, uploading video-only file as fallback');
+        uploadPromises.push(this.uploadFile(this.videoPath, 'video', this.formatConfig.mime));
+      } else if (this.s3VideoUrl) {
+        // Chunk uploader already uploaded video-only file; no merged file available
+        logger.info('Using chunk-uploaded video-only file (merge was not available)');
       }
 
-      // Always upload audio separately for transcription
-      if (this.audioPath && fs.existsSync(this.audioPath)) {
-        uploadPromises.push(this.uploadFile(this.audioPath, 'audio', 'audio/wav'));
+      // Always upload the 16kHz mono audio for transcription separately
+      if (this.transcriptionAudioPath && fs.existsSync(this.transcriptionAudioPath)) {
+        const sizeMB = (fs.statSync(this.transcriptionAudioPath).size / 1024 / 1024).toFixed(1);
+        logger.info(`Uploading audio for transcription: ${path.basename(this.transcriptionAudioPath)} (${sizeMB}MB)`);
+        uploadPromises.push(this.uploadFile(this.transcriptionAudioPath, 'audio', 'audio/wav'));
       }
     }
 
     await Promise.all(uploadPromises);
   }
 
-  private async uploadFile(
-    localPath: string,
-    type: 'video' | 'audio' | 'merged',
-    contentType: string
-  ): Promise<void> {
+  private async uploadFile(localPath: string, type: 'video' | 'audio', contentType: string): Promise<void> {
     if (!this.s3Client) return;
 
     const filename = path.basename(localPath);
@@ -965,9 +1433,6 @@ export class RecordingOrchestrator extends EventEmitter {
         case 'audio':
           this.s3AudioUrl = s3Url;
           break;
-        case 'merged':
-          this.s3MergedUrl = s3Url;
-          break;
       }
 
       // Emit chunk uploaded event
@@ -975,7 +1440,7 @@ export class RecordingOrchestrator extends EventEmitter {
         chunkIndex: this.chunkIndex++,
         chunkPath: localPath,
         s3Url,
-        type: type === 'merged' ? 'video' : type,
+        type,
         size: fileStats.size,
       };
       this.emit('chunk-uploaded', chunkEvent);
@@ -1003,8 +1468,8 @@ export class RecordingOrchestrator extends EventEmitter {
   private async cleanupTempFiles(): Promise<void> {
     logger.info('Cleaning up temporary files');
 
-    const filesToDelete = [this.videoPath, this.audioPath, this.mergedPath].filter(
-      (p): p is string => p !== null && fs.existsSync(p)
+    const filesToDelete = [this.videoPath, this.audioPath, this.mergedPath, this.transcriptionAudioPath].filter(
+      (p): p is string => p !== null && fs.existsSync(p),
     );
 
     for (const file of filesToDelete) {
@@ -1021,11 +1486,7 @@ export class RecordingOrchestrator extends EventEmitter {
   // Error Handling
   // ==========================================================================
 
-  private emitError(
-    error: Error,
-    phase: RecordingErrorEvent['phase'],
-    recoverable: boolean
-  ): void {
+  private emitError(error: Error, phase: RecordingErrorEvent['phase'], recoverable: boolean): void {
     const errorEvent: RecordingErrorEvent = {
       error,
       phase,
@@ -1042,9 +1503,7 @@ export class RecordingOrchestrator extends EventEmitter {
 /**
  * Create a new RecordingOrchestrator instance
  */
-export function createRecordingOrchestrator(
-  config: RecordingOrchestratorConfig
-): RecordingOrchestrator {
+export function createRecordingOrchestrator(config: RecordingOrchestratorConfig): RecordingOrchestrator {
   return new RecordingOrchestrator(config);
 }
 
@@ -1073,5 +1532,5 @@ export function createRecordingOrchestrator(
 export type RecordingOrchestratorEventMap = {
   'chunk-uploaded': ChunkUploadedEvent;
   'recording-complete': RecordingCompleteEvent;
-  'error': RecordingErrorEvent;
+  error: RecordingErrorEvent;
 };

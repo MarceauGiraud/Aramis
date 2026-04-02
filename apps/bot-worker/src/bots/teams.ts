@@ -380,7 +380,12 @@ export class TeamsBot extends BaseMeetingBot {
     logger.info('Successfully joined Teams meeting');
     await this.takeDebugScreenshot('07_joined_successfully');
 
-    // Wait for the meeting UI to be fully rendered before starting recording.
+    // Start recording immediately — FFmpeg x11grab captures the screen
+    // regardless of what's on it, so it's safe to start early and trim later.
+    // This avoids losing content while the UI setup steps run (~25s).
+    await this.startRecording();
+
+    // Wait for the meeting UI to be fully rendered.
     await this.waitForMeetingUIReady();
 
     // Clean up Teams UI for recording: blanket overlay hides all chrome
@@ -393,13 +398,10 @@ export class TeamsBot extends BaseMeetingBot {
     // Prevent Teams from going idle during recording
     await this.startFakeActivity();
 
-    // Wait for WebRTC to establish before starting recording
-    await this.waitForWebRTCReady();
-
-    // Start recording
-    await this.startRecording();
+    // Mark the content start AFTER UI is ready so the trim correctly
+    // removes the setup period (toolbars, layout switching, etc.).
     this.meetingContentStartTime = Date.now();
-    logger.info('Meeting content starts — UI ready, recording started');
+    logger.info('Meeting content starts — UI ready, recording already running');
   }
 
   /**
@@ -970,101 +972,170 @@ export class TeamsBot extends BaseMeetingBot {
   }
 
   /**
-   * Set up the recording UI using a "blanket" approach (inspired by Attendee).
+   * Set up the recording UI for a clean video capture (MeetingBaas approach).
    *
-   * Instead of trying to hide individual UI elements (chat, toolbar, banners),
-   * we cover EVERYTHING with a white blanket div, then promote the central
-   * video area above it. This is more robust than targeting specific selectors
-   * because Teams frequently re-renders and changes its DOM structure.
+   * Instead of promoting `[data-test-segment-type="central"]` above a blanket
+   * (which only shows the main speaker, not filmstrip thumbnails, and breaks
+   * under CSS `contain: paint` on Teams v2 ancestors), we:
    *
-   * Layer stack:
-   *   z-index 1998: white blanket (covers chat, toolbar, banners, everything)
-   *   z-index 1999: [data-test-segment-type="central"] (the video area)
+   *   1. Hide the header toolbar via opacity (not display:none to avoid re-layout)
+   *   2. Force the main content area to fill the viewport
+   *   3. Cover any menus/overlays with black
+   *   4. Remove voice level indicator borders
+   *   5. Hide banners and notifications
+   *
+   * A blanket div is kept as fallback if `app-layout-area--main` is absent
+   * (falls back to promoting the central segment like before).
+   *
+   * A rAF loop re-applies styles at ~1 FPS to survive Teams DOM re-renders.
    */
   private async setupRecordingUI(): Promise<void> {
     if (!this.page) return;
 
     try {
       await this.page.evaluate(() => {
-        const id = '__aramis-recording-ui';
-        if (document.getElementById(id)) return;
+        const styleId = '__aramis-recording-style';
+        const blanketId = '__aramis-recording-ui';
+        if (document.getElementById(styleId)) return;
 
-        // 1. White blanket covering everything
-        const blanket = document.createElement('div');
-        blanket.id = id;
-        Object.assign(blanket.style, {
-          position: 'fixed',
-          inset: '0',
-          background: '#1a1a1a',
-          zIndex: '1998',
-          pointerEvents: 'none',
-        });
-        document.body.appendChild(blanket);
-
-        // 2. CSS to promote the central video area above the blanket
+        // 1. Inject CSS rules
         const style = document.createElement('style');
-        style.id = '__aramis-recording-style';
+        style.id = styleId;
         style.textContent = `
-          /* Promote central video pane above the blanket */
-          [data-test-segment-type="central"] {
+          /* Hide the header toolbar (opacity keeps layout stable) */
+          [data-tid="app-layout-area--header"] {
+            opacity: 0 !important;
+            height: 0 !important;
+            overflow: hidden !important;
+          }
+
+          /* Force the main content area to fill the entire viewport */
+          [data-tid="app-layout-area--main"] {
             position: fixed !important;
             inset: 0 !important;
             width: 100vw !important;
             height: 100vh !important;
             z-index: 1999 !important;
           }
-          [data-test-segment-type="central"],
-          [data-test-segment-type="central"] * {
-            pointer-events: auto !important;
+
+          /* Cover any menus/overlays with black */
+          [role="menu"] {
+            position: fixed !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            background: black !important;
+            z-index: 9999 !important;
           }
-          /* Hide self-view overlay */
+
+          /* Remove voice level indicator borders */
+          [data-tid="voice-level-stream-outline"]::before {
+            border: 0px !important;
+          }
+
+          /* Hide banners and notifications */
+          [data-tid="app-banner"],
+          [role="banner"],
+          [data-tid="notification-bar"] {
+            display: none !important;
+          }
+
+          /* Hide self-view overlay (v1 + v2 selectors) */
           [data-tid="self-video"],
           [data-cid="calling-self-video"],
           .ts-calling-self-video,
-          [data-tid="self-preview"] {
-            display: none !important;
+          [data-tid="self-preview"],
+          [data-tid="self-video-pip"],
+          [data-cid="calling-self-video-pip"],
+          [data-tid="calling-self-video"],
+          [data-tid="self-video-tile"] {
+            opacity: 0 !important;
+            pointer-events: none !important;
           }
-          /* Hide the top banner ("Teams will soon have a new URL...") */
-          [data-tid="app-banner"],
-          .app-banner,
-          [role="banner"] {
-            display: none !important;
+
+          /* Fallback: if main area approach works, central segment inherits.
+             If main area is missing, we promote central via the rAF loop. */
+          [data-test-segment-type="central"] {
+            pointer-events: auto !important;
           }
         `;
         document.head.appendChild(style);
-      });
-      logger.info('Recording UI blanket injected (chat/toolbar hidden, video promoted)');
 
-      // 3. Start a requestAnimationFrame loop throttled to ~1 FPS to keep video filling the frame
+        // 2. Create blanket as fallback (only visible if main area is absent)
+        const blanket = document.createElement('div');
+        blanket.id = blanketId;
+        Object.assign(blanket.style, {
+          position: 'fixed',
+          inset: '0',
+          background: '#1a1a1a',
+          zIndex: '1998',
+          pointerEvents: 'none',
+          display: 'none', // hidden by default; shown only in fallback mode
+        });
+        document.body.appendChild(blanket);
+      });
+      logger.info('Recording UI styles injected (MeetingBaas approach: header hidden, main area promoted)');
+
+      // 3. Start a requestAnimationFrame loop throttled to ~1 FPS
       await this.page.evaluate(() => {
         if ((window as any).__aramisRecordingUIRunning) return;
         (window as any).__aramisRecordingUIRunning = true;
+
         (function aramisLoop(lastRun: number) {
           if (!(window as any).__aramisRecordingUIRunning) return;
           requestAnimationFrame((now) => {
             if (now - lastRun > 1000) {
               // Throttle to ~1 FPS
-              const central = document.querySelector('[data-test-segment-type="central"]') as HTMLElement;
-              if (central) {
-                central.style.position = 'fixed';
-                central.style.inset = '0';
-                central.style.width = '100vw';
-                central.style.height = '100vh';
-                central.style.zIndex = '1999';
+              const mainArea = document.querySelector('[data-tid="app-layout-area--main"]') as HTMLElement;
+
+              if (mainArea) {
+                // Primary approach: force main area to fill viewport
+                mainArea.style.position = 'fixed';
+                mainArea.style.inset = '0';
+                mainArea.style.width = '100vw';
+                mainArea.style.height = '100vh';
+                mainArea.style.zIndex = '1999';
+
+                // Hide header toolbar
+                const header = document.querySelector('[data-tid="app-layout-area--header"]') as HTMLElement;
+                if (header) {
+                  header.style.opacity = '0';
+                  header.style.height = '0';
+                  header.style.overflow = 'hidden';
+                }
+
+                // Hide blanket in primary mode
+                const blanket = document.getElementById('__aramis-recording-ui');
+                if (blanket) blanket.style.display = 'none';
+              } else {
+                // Fallback: promote central segment above blanket (old approach)
+                const central = document.querySelector('[data-test-segment-type="central"]') as HTMLElement;
+                if (central) {
+                  central.style.position = 'fixed';
+                  central.style.inset = '0';
+                  central.style.width = '100vw';
+                  central.style.height = '100vh';
+                  central.style.zIndex = '1999';
+                }
+
+                // Show blanket in fallback mode
+                const blanket = document.getElementById('__aramis-recording-ui');
+                if (blanket) {
+                  blanket.style.display = 'block';
+                } else {
+                  // Re-create blanket if Teams cleared it
+                  const newBlanket = document.createElement('div');
+                  newBlanket.id = '__aramis-recording-ui';
+                  Object.assign(newBlanket.style, {
+                    position: 'fixed',
+                    inset: '0',
+                    background: '#1a1a1a',
+                    zIndex: '1998',
+                    pointerEvents: 'none',
+                  });
+                  document.body.appendChild(newBlanket);
+                }
               }
-              // Re-ensure blanket is present (Teams may clear injected nodes)
-              if (!document.getElementById('__aramis-recording-ui')) {
-                const blanket = document.createElement('div');
-                blanket.id = '__aramis-recording-ui';
-                Object.assign(blanket.style, {
-                  position: 'fixed',
-                  inset: '0',
-                  background: '#1a1a1a',
-                  zIndex: '1998',
-                  pointerEvents: 'none',
-                });
-                document.body.appendChild(blanket);
-              }
+
               lastRun = now;
             }
             aramisLoop(lastRun);

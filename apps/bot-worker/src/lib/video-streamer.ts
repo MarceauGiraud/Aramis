@@ -24,10 +24,10 @@ export interface VideoStreamerOptions {
 }
 
 export interface VideoStreamerEvents {
-  'start': () => void;
-  'stop': (outputPath: string) => void;
-  'error': (error: Error) => void;
-  'progress': (info: ProgressInfo) => void;
+  start: () => void;
+  stop: (outputPath: string) => void;
+  error: (error: Error) => void;
+  progress: (info: ProgressInfo) => void;
 }
 
 export interface ProgressInfo {
@@ -182,7 +182,6 @@ export class VideoStreamer extends EventEmitter {
             reject(new Error(`FFmpeg startup failed: ${startupError}`));
           }
         }, 500);
-
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         logger.error(`Failed to start FFmpeg: ${err.message}`);
@@ -271,36 +270,52 @@ export class VideoStreamer extends EventEmitter {
       // Overwrite output file without asking
       '-y',
 
+      // Probe and queue settings to avoid black frames at start
+      '-probesize',
+      '20M',
+      '-thread_queue_size',
+      '1024',
+
       // Input: X11 display capture
-      '-f', 'x11grab',
-      '-framerate', String(this.options.frameRate),
-      '-video_size', this.options.resolution,
-      '-i', this.options.display,
+      '-f',
+      'x11grab',
+      '-draw_mouse',
+      '0',
+      '-framerate',
+      String(this.options.frameRate),
+      '-video_size',
+      this.options.resolution,
+      '-i',
+      this.options.display,
     ];
 
     // Add audio capture if enabled
     if (this.options.captureAudio) {
-      args.push(
-        '-f', 'pulse',
-        '-i', this.options.audioSource
-      );
+      args.push('-f', 'pulse', '-i', this.options.audioSource);
     }
 
     // Output encoding settings based on format
     if (this.options.format === 'webm') {
       args.push(
         // VP9 video codec for WebM
-        '-c:v', 'libvpx-vp9',
-        '-b:v', this.options.videoBitrate,
+        '-c:v',
+        'libvpx-vp9',
+        '-b:v',
+        this.options.videoBitrate,
         // Real-time encoding preset
-        '-deadline', 'realtime',
-        '-cpu-used', '8',
+        '-deadline',
+        'realtime',
+        '-cpu-used',
+        '8',
         // Keyframe interval for seekability
-        '-g', '30',
+        '-g',
+        '30',
         // Row-based multithreading
-        '-row-mt', '1',
+        '-row-mt',
+        '1',
         // Disable tile columns for lower latency
-        '-tile-columns', '0'
+        '-tile-columns',
+        '0',
       );
 
       if (this.options.captureAudio) {
@@ -309,16 +324,23 @@ export class VideoStreamer extends EventEmitter {
     } else {
       // MP4 format with H.264
       args.push(
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'zerolatency',
-        '-b:v', this.options.videoBitrate,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-tune',
+        'zerolatency',
+        '-b:v',
+        this.options.videoBitrate,
         // Keyframe interval
-        '-g', '30',
+        '-g',
+        '30',
         // Pixel format for compatibility
-        '-pix_fmt', 'yuv420p',
+        '-pix_fmt',
+        'yuv420p',
         // Enable streaming-friendly output
-        '-movflags', '+faststart+frag_keyframe+empty_moov'
+        '-movflags',
+        '+faststart+frag_keyframe+empty_moov',
       );
 
       if (this.options.captureAudio) {
@@ -355,10 +377,10 @@ export class VideoStreamer extends EventEmitter {
         const sizeValue = parseInt(sizeMatch[1], 10);
         const sizeUnit = sizeMatch[2].toLowerCase();
         const multipliers: Record<string, number> = {
-          'b': 1,
-          'kb': 1024,
-          'mb': 1024 * 1024,
-          'gb': 1024 * 1024 * 1024,
+          b: 1,
+          kb: 1024,
+          mb: 1024 * 1024,
+          gb: 1024 * 1024 * 1024,
         };
         fileSize = sizeValue * (multipliers[sizeUnit] || 1);
       }
@@ -387,7 +409,7 @@ export class VideoStreamer extends EventEmitter {
           duration,
           fileSize: stats.size,
           frames: Math.floor(duration * this.options.frameRate),
-          bitrate: `${Math.round(stats.size * 8 / duration / 1000)}kbits/s`,
+          bitrate: `${Math.round((stats.size * 8) / duration / 1000)}kbits/s`,
         });
       }
     }, 5000);
@@ -430,12 +452,6 @@ export class VideoStreamer extends EventEmitter {
 
 // Type augmentation for EventEmitter
 export interface VideoStreamer {
-  on<K extends keyof VideoStreamerEvents>(
-    event: K,
-    listener: VideoStreamerEvents[K]
-  ): this;
-  emit<K extends keyof VideoStreamerEvents>(
-    event: K,
-    ...args: Parameters<VideoStreamerEvents[K]>
-  ): boolean;
+  on<K extends keyof VideoStreamerEvents>(event: K, listener: VideoStreamerEvents[K]): this;
+  emit<K extends keyof VideoStreamerEvents>(event: K, ...args: Parameters<VideoStreamerEvents[K]>): boolean;
 }

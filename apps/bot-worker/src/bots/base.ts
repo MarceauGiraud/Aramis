@@ -210,10 +210,11 @@ export abstract class BaseMeetingBot {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        // Use fake media devices (Chromium's built-in test pattern)
+        // Auto-accept media permission prompts (camera/mic) without user interaction
         '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream',
-        // Do NOT use --use-file-for-fake-*-capture=/dev/null — it crashes the media pipeline
+        // Do NOT use --use-fake-device-for-media-stream — it creates a recognizable
+        // color-bar test pattern that Google Meet uses to flag the client as a bot.
+        // Instead, we rely on the real (virtual) PulseAudio device from DisplayAllocator.
         // Do NOT use --disable-gpu — it causes black screenshots on Xvfb with SwiftShader
         '--enable-unsafe-swiftshader',
         // Use ANGLE with SwiftShader backend for better WebGL canvas rendering
@@ -911,6 +912,36 @@ export abstract class BaseMeetingBot {
       if (trimmedDurationMs > 1000) {
         trimEndSeconds = trimmedDurationMs / 1000;
         logger.info(`Will trim end of recording at ${trimEndSeconds.toFixed(1)}s (meeting ended)`);
+      }
+    }
+
+    // Guard: prevent over-trimming short recordings
+    if (trimStartSeconds !== undefined || trimEndSeconds !== undefined) {
+      const recordingStartMs = this.recordingOrchestrator.getStartTime()!.getTime();
+      const totalRecordingDurationSec = (Date.now() - recordingStartMs) / 1000;
+
+      // If start trim would remove 80%+ of the recording, skip it
+      if (trimStartSeconds !== undefined && trimStartSeconds > totalRecordingDurationSec * 0.8) {
+        logger.warn(
+          `Skipping start trim: ${trimStartSeconds.toFixed(1)}s exceeds 80% of total recording (${totalRecordingDurationSec.toFixed(1)}s)`
+        );
+        trimStartSeconds = undefined;
+      }
+
+      // Compute effective duration after trimming
+      let effectiveDuration: number;
+      if (trimEndSeconds !== undefined) {
+        effectiveDuration = trimEndSeconds - (trimStartSeconds ?? 0);
+      } else {
+        effectiveDuration = totalRecordingDurationSec - (trimStartSeconds ?? 0);
+      }
+
+      if (effectiveDuration < 5) {
+        logger.warn(
+          `Skipping trim: resulting duration would be too short (${effectiveDuration.toFixed(1)}s), keeping full recording`
+        );
+        trimStartSeconds = undefined;
+        trimEndSeconds = undefined;
       }
     }
 
