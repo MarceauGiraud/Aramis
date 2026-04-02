@@ -33,7 +33,7 @@ COPY . .
 # Install Google Chrome (stable channel) for Teams video codec support.
 # Chromium lacks proprietary H.264/AAC codecs, causing Teams participant
 # video to appear as "camera off". Chrome for Testing includes them.
-RUN npx playwright install --with-deps chrome
+RUN pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome
 
 # Generate Prisma client and build all packages in a single layer
 RUN pnpm --filter @aramis/database generate \
