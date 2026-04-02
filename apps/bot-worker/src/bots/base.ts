@@ -209,9 +209,8 @@ export abstract class BaseMeetingBot {
     this.browser = await (chromium as any).launch({
       headless: this.options.headless,
       // Use Google Chrome instead of Chromium for proprietary H.264/AAC codec
-      // support. Chrome for Testing is only available on x86_64; on ARM64
-      // (Apple Silicon dev machines) we fall back to the bundled Chromium.
-      ...(process.arch === 'x64' ? { channel: 'chrome' as const } : {}),
+      // support. The container always runs as linux/amd64 (QEMU on ARM64).
+      channel: 'chrome' as const,
       env: {
         ...process.env,
         DISPLAY: display,

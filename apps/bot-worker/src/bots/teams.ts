@@ -67,7 +67,7 @@ const TEAMS_CAMERA_PROMPT_SELECTORS = [
  */
 export class TeamsBot extends BaseMeetingBot {
   private lastKnownParticipantCount = 0;
-
+  private rosterParticipants: Map<string, string> = new Map();
 
   constructor(config: BotConfig, options?: BotOptions) {
     super({ ...config, platform: config.platform ?? 'TEAMS' }, options);
@@ -212,14 +212,18 @@ export class TeamsBot extends BaseMeetingBot {
     try {
       // Structure 1: { participants: [...] } or { roster: [...] }
       if (Array.isArray(data.participants)) {
-        return data.participants.filter(
+        const active = data.participants.filter(
           (p: any) => p.state === 'Connected' || p.state === 'InLobby' || !p.state,
-        ).length;
+        );
+        this.extractNamesFromRosterArray(active);
+        return active.length;
       }
       if (Array.isArray(data.roster)) {
-        return data.roster.filter(
+        const active = data.roster.filter(
           (p: any) => p.state === 'Connected' || !p.state,
-        ).length;
+        );
+        this.extractNamesFromRosterArray(active);
+        return active.length;
       }
 
       // Structure 2: { participantCount: N } or { activeParticipantCount: N }
@@ -241,6 +245,129 @@ export class TeamsBot extends BaseMeetingBot {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Extract display names from a roster/participants array received via
+   * WebSocket signaling and store them in `this.rosterParticipants`.
+   */
+  private extractNamesFromRosterArray(entries: any[]): void {
+    for (let i = 0; i < entries.length; i++) {
+      const p = entries[i];
+      const name: string | undefined =
+        p.displayName ??
+        p.name ??
+        p.identity?.user?.displayName ??
+        p.user?.displayName ??
+        undefined;
+
+      if (name && typeof name === 'string' && name.trim()) {
+        const id: string = p.id ?? p.participantId ?? p.mri ?? String(i);
+        this.rosterParticipants.set(id, name.trim());
+      }
+    }
+  }
+
+  /**
+   * Extract participant details for the Teams meeting.
+   *
+   * Strategy order:
+   * 1. WebSocket roster data (most reliable -- collected from signaling frames)
+   * 2. DOM scraping via the roster panel
+   * 3. Base class fallback (speaker history)
+   */
+  async extractParticipants(): Promise<{ name: string; email?: string; isHost?: boolean }[]> {
+    // Strategy 1: use names collected from WebSocket roster frames
+    if (this.rosterParticipants.size > 0) {
+      const participants = Array.from(this.rosterParticipants.values()).map((name) => ({
+        name,
+        isHost: false,
+      }));
+      logger.info(`Extracted ${participants.length} participants from WebSocket roster data`);
+      return participants;
+    }
+
+    // Strategy 2: DOM scraping -- open the roster panel and read names
+    if (this.page) {
+      try {
+        const rosterBtnSelectors = [
+          '[data-tid="roster-button"]',
+          '[data-tid="people-button"]',
+          '[data-tid="calling-roster-button"]',
+          'button[id="roster-button"]',
+          '[aria-label*="participant" i]',
+          '[aria-label*="people" i]',
+          '[aria-label*="personne" i]',
+        ];
+
+        let panelOpened = false;
+        for (const selector of rosterBtnSelectors) {
+          try {
+            const btn = await this.page.$(selector);
+            if (btn) {
+              await btn.click();
+              await this.sleep(1000);
+              panelOpened = true;
+              break;
+            }
+          } catch {
+            // try next selector
+          }
+        }
+
+        if (panelOpened) {
+          const names = await this.page.evaluate(() => {
+            const results: string[] = [];
+            // Teams roster panel uses list items with participant names
+            const selectors = [
+              '[data-tid="roster-participant"] [data-tid="roster-participant-name"]',
+              '[data-tid="roster-participant-name"]',
+              '[data-cid="roster-participant"] span[title]',
+              '.roster-list-item span[title]',
+              '[role="listitem"] [data-tid*="participant"] span',
+              // v2 selectors
+              '[data-tid="roster-section"] [role="listitem"] span[title]',
+              '[data-tid="roster-section"] [role="listitem"] [data-tid*="name"]',
+            ];
+            for (const sel of selectors) {
+              const elements = document.querySelectorAll(sel);
+              if (elements.length > 0) {
+                elements.forEach((el) => {
+                  const name = (el as HTMLElement).title || (el as HTMLElement).textContent?.trim();
+                  if (name) results.push(name);
+                });
+                break;
+              }
+            }
+            return results;
+          });
+
+          // Close the roster panel by clicking the button again
+          for (const selector of rosterBtnSelectors) {
+            try {
+              const btn = await this.page.$(selector);
+              if (btn) {
+                await btn.click();
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+
+          if (names.length > 0) {
+            const unique = Array.from(new Set(names));
+            logger.info(`Extracted ${unique.length} participants from Teams roster panel DOM`);
+            return unique.map((name) => ({ name, isHost: false }));
+          }
+        }
+      } catch (error) {
+        logger.warn(`Failed to extract participants from Teams DOM: ${error}`);
+      }
+    }
+
+    // Strategy 3: fall back to base class (speaker history)
+    return super.extractParticipants();
   }
 
   /**

@@ -31,13 +31,9 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 
 # Install Google Chrome for Teams video codec support (H.264/AAC).
-# Chrome for Testing is only available on x86_64. On ARM64 (Apple Silicon),
-# the Playwright base image already bundles Chromium with codec support.
-RUN if [ "$(uname -m)" = "x86_64" ]; then \
-      pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome; \
-    else \
-      echo "ARM64 detected — using bundled Chromium (Chrome not available on ARM64)"; \
-    fi
+# The container always runs as linux/amd64 (QEMU on Apple Silicon),
+# so Chrome for Testing is always available.
+RUN pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome
 
 # Generate Prisma client and build all packages in a single layer
 RUN pnpm --filter @aramis/database generate \
