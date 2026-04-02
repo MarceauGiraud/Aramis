@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.41.0-jammy
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy
 
 # Set working directory
 WORKDIR /app
@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y \
     libasound2-dev \
     xvfb \
     x11-utils \
+    imagemagick \
+    matchbox-window-manager \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace config
@@ -28,36 +30,33 @@ RUN pnpm install --frozen-lockfile
 # Copy source code
 COPY . .
 
-# Generate Prisma client
-RUN pnpm --filter @aramis/database generate
+# Install Google Chrome (stable channel) for Teams video codec support.
+# Chromium lacks proprietary H.264/AAC codecs, causing Teams participant
+# video to appear as "camera off". Chrome for Testing includes them.
+RUN npx playwright install --with-deps chrome
 
-# Build packages
-RUN pnpm --filter @aramis/shared build
-RUN pnpm --filter @aramis/database build
-RUN pnpm --filter @aramis/bot-worker build
+# Generate Prisma client and build all packages in a single layer
+RUN pnpm --filter @aramis/database generate \
+    && pnpm --filter @aramis/shared build \
+    && pnpm --filter @aramis/database build \
+    && pnpm --filter @aramis/bot-worker build
 
 # Create recordings directory
-RUN mkdir -p /tmp/recordings
+RUN mkdir -p /tmp/recordings /tmp/bot-screenshots
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV DISPLAY=:99
 
-# Configure PulseAudio for headless audio capture
+# Configure PulseAudio (daemon only -- sinks are created per-bot by DisplayAllocator)
 RUN mkdir -p /root/.config/pulse
 COPY <<EOF /root/.config/pulse/default.pa
-load-module module-null-sink sink_name=virtual_speaker sink_properties=device.description="Virtual_Speaker"
-set-default-sink virtual_speaker
 load-module module-native-protocol-unix
 EOF
 
-# Create entrypoint script to start Xvfb + PulseAudio + Node
+# Create entrypoint script: start PulseAudio, then Node
+# Xvfb displays and PulseAudio sinks are managed per-bot by DisplayAllocator
 RUN echo '#!/bin/bash\n\
-# Start Xvfb (virtual X display)\n\
-Xvfb :99 -screen 0 1920x1080x24 &\n\
-sleep 1\n\
-\n\
-# Start PulseAudio\n\
+# Start PulseAudio daemon (sinks created dynamically per bot)\n\
 pulseaudio --start --exit-idle-time=-1\n\
 sleep 1\n\
 \n\
