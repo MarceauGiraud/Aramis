@@ -677,15 +677,15 @@ export class TeamsBot extends BaseMeetingBot {
         'button[aria-label*="view" i]',
       ];
 
-      let clicked = false;
-      for (const sel of viewBtnSelectors) {
-        const btn = await this.page.$(sel);
-        if (btn) {
-          await btn.click();
-          clicked = true;
-          break;
-        }
-      }
+      // Use page.evaluate() for all clicks to bypass the recording overlay
+      // (app-layout-area--main at z-index 1999 intercepts Playwright clicks)
+      const allViewBtnSels = viewBtnSelectors.join(', ');
+      const clicked = await this.page.evaluate((sels) => {
+        const btn = document.querySelector(sels) as HTMLElement | null;
+        if (btn) { btn.click(); return true; }
+        return false;
+      }, allViewBtnSels).catch(() => false);
+
       if (!clicked) {
         logger.info('Layout button not found — using default layout');
         return;
@@ -696,21 +696,18 @@ export class TeamsBot extends BaseMeetingBot {
       // Select the desired view
       const viewSelectors =
         view === 'gallery'
-          ? [
-              '#custom-view-button-MixedGridButton',
-              '#MixedGrid-button',
-              '#MixedGridView-button',
-              '[aria-label*="Gallery" i]',
-            ]
-          : ['#custom-view-button-SpeakerViewButton', '#SpeakerView-button', '[aria-label*="Speaker" i]'];
+          ? '#custom-view-button-MixedGridButton, #MixedGrid-button, #MixedGridView-button, [aria-label*="Gallery" i]'
+          : '#custom-view-button-SpeakerViewButton, #SpeakerView-button, [aria-label*="Speaker" i]';
 
-      for (const sel of viewSelectors) {
-        const option = await this.page.$(sel);
-        if (option) {
-          await option.click();
-          logger.info(`Layout set to ${view} via ${sel}`);
-          return;
-        }
+      const selected = await this.page.evaluate((sels) => {
+        const option = document.querySelector(sels) as HTMLElement | null;
+        if (option) { option.click(); return option.id || option.getAttribute('aria-label') || 'found'; }
+        return null;
+      }, viewSelectors).catch(() => null);
+
+      if (selected) {
+        logger.info(`Layout set to ${view} via ${selected}`);
+        return;
       }
 
       // Close menu if we couldn't find the option
@@ -2070,29 +2067,58 @@ export class TeamsBot extends BaseMeetingBot {
       '[data-tid="leave-call-button"]',
     ];
 
+    // Use page.evaluate() for leave click to bypass the recording overlay
+    const allLeaveSels = leaveSelectors
+      .filter((s) => !s.startsWith('button:has-text'))
+      .join(', ');
+    const leftViaJs = await this.page
+      .evaluate((sels) => {
+        const btn = document.querySelector(sels) as HTMLElement | null;
+        if (btn) {
+          btn.click();
+          return true;
+        }
+        return false;
+      }, allLeaveSels)
+      .catch(() => false);
+
+    if (leftViaJs) {
+      logger.info('Clicked leave button via JS');
+      await this.sleep(1000);
+
+      // Confirm leave dialog via JS
+      await this.page
+        .evaluate(() => {
+          const confirmSels = [
+            '[data-tid="confirm-leave"]',
+            '[data-tid="leave-confirm"]',
+          ];
+          for (const sel of confirmSels) {
+            const btn = document.querySelector(sel) as HTMLElement | null;
+            if (btn) { btn.click(); return; }
+          }
+          // Fallback: find button containing "Leave" or "Quitter"
+          const buttons = document.querySelectorAll('button, [role="button"]');
+          for (const b of buttons) {
+            const text = (b as HTMLElement).textContent?.trim().toLowerCase() || '';
+            if (text === 'leave' || text === 'quitter') {
+              (b as HTMLElement).click();
+              return;
+            }
+          }
+        })
+        .catch(() => {});
+      logger.info('Leave flow completed');
+      return;
+    }
+
+    // Fallback: try Playwright clicks (pre-recording or overlay not active)
     for (const selector of leaveSelectors) {
       try {
         const leaveBtn = await this.page.$(selector);
         if (leaveBtn) {
           await this.humanClick(selector);
-          logger.info(`Clicked leave button: ${selector}`);
-          await this.sleep(1000);
-
-          // Confirm leave if dialog appears
-          const confirmSelectors = [
-            'button:has-text("Leave")',
-            'button:has-text("Quitter")',
-            '[data-tid="confirm-leave"]',
-          ];
-
-          for (const confirmSelector of confirmSelectors) {
-            const confirmBtn = await this.page.$(confirmSelector);
-            if (confirmBtn) {
-              await this.humanClick(confirmSelector);
-              logger.info('Confirmed leaving Teams meeting');
-              return;
-            }
-          }
+          logger.info(`Clicked leave button via Playwright: ${selector}`);
           return;
         }
       } catch {
