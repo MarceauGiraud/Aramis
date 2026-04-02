@@ -205,7 +205,8 @@ export abstract class BaseMeetingBot {
     // Set DISPLAY for Chromium to use the allocated Xvfb display
     const display = this.config.display || process.env.DISPLAY || ':99';
 
-    this.browser = await chromium.launch({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.browser = await (chromium as any).launch({
       headless: this.options.headless,
       // Use Google Chrome instead of Chromium for proprietary H.264/AAC codec
       // support. Chrome for Testing is only available on x86_64; on ARM64
@@ -266,7 +267,7 @@ export abstract class BaseMeetingBot {
     }
 
     // Use incognito context (video recording is now handled by FFmpeg/RecordingOrchestrator)
-    this.context = await this.browser.newContext({
+    this.context = await this.browser!.newContext({
       permissions: ['microphone', 'camera'],
       viewport: { width: resolution.width, height: resolution.height },
       userAgent:
