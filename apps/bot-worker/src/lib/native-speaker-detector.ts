@@ -30,12 +30,30 @@ export class NativeSpeakerDetector extends EventEmitter {
       allParticipants: '.video-avatar-image, .video-avatar__avatar',
     },
     TEAMS: {
-      // Teams - le speaker actif a une bordure bleue/violet
-      activeSpeaker: '[data-cid="calling-participant-video"][data-is-speaking="true"]',
-      participantName: '[data-cid="roster-participant-name"]',
-      allParticipants: '[data-cid="calling-participant-video"]',
-      // Alternative: via la liste des participants
-      speakingIndicator: '.speaking-indicator, [data-tid="active-speaker-indicator"]',
+      // Teams classic + v2 React SPA selectors (tried in order)
+      // Classic: data-cid attributes; v2: data-tid, data-stream-type, data-test-segment-type
+      activeSpeaker: [
+        '[data-cid="calling-participant-video"][data-is-speaking="true"]',
+        '[data-stream-type="Video"][data-is-speaking="true"]',
+        '[data-tid="active-speaker"]',
+        '[data-tid="dominant-speaker"]',
+      ].join(', '),
+      participantName: [
+        '[data-cid="roster-participant-name"]',
+        '[data-tid="participant-name"]',
+        '[data-tid="roster-participant"]',
+      ].join(', '),
+      allParticipants: [
+        '[data-cid="calling-participant-video"]',
+        '[data-stream-type="Video"]',
+        '[data-cid="calling-participant-stream"]',
+        '[data-test-segment-type="central"] video',
+      ].join(', '),
+      speakingIndicator: [
+        '.speaking-indicator',
+        '[data-tid="active-speaker-indicator"]',
+        '[data-tid="speaking-indicator"]',
+      ].join(', '),
     },
     GOOGLE_MEET: {
       // Google Meet - bordure bleue animée autour du speaker
@@ -88,17 +106,24 @@ export class NativeSpeakerDetector extends EventEmitter {
             // Zoom: chercher l'élément avec la classe active
             const activeEl = document.querySelector(selectors.activeSpeaker);
             if (activeEl) {
-              const nameEl = activeEl.querySelector(selectors.participantName) ||
-                             activeEl.closest('[class*="video-avatar"]')?.querySelector(selectors.participantName);
+              const nameEl =
+                activeEl.querySelector(selectors.participantName) ||
+                activeEl.closest('[class*="video-avatar"]')?.querySelector(selectors.participantName);
               speakerName = nameEl?.textContent?.trim() || null;
             }
           } else if (platform === 'TEAMS') {
-            // Teams: chercher l'indicateur de speaking
+            // Teams: chercher l'indicateur de speaking (classic + v2 selectors)
             const activeEl = document.querySelector(selectors.activeSpeaker);
             if (activeEl) {
-              const nameEl = activeEl.querySelector('[data-tid="participant-name"]') ||
-                             activeEl.getAttribute('data-participant-name');
-              speakerName = typeof nameEl === 'string' ? nameEl : nameEl?.textContent?.trim() || null;
+              // Try multiple name resolution strategies (classic then v2)
+              const nameEl = activeEl.querySelector(selectors.participantName);
+              const nameFromAttr =
+                activeEl.getAttribute('data-participant-name') ||
+                activeEl.getAttribute('aria-label');
+              speakerName =
+                nameEl?.textContent?.trim() ||
+                nameFromAttr ||
+                null;
             }
           } else if (platform === 'GOOGLE_MEET') {
             // Google Meet: chercher l'élément avec bordure active
@@ -107,14 +132,16 @@ export class NativeSpeakerDetector extends EventEmitter {
               // Vérifier si le participant a la bordure bleue (speaking indicator)
               const rect = participant.getBoundingClientRect();
               const styles = window.getComputedStyle(participant);
-              const hasActiveBorder = styles.borderColor.includes('66, 133, 244') || // Google blue
-                                      participant.classList.contains('IjbFje') ||
-                                      participant.querySelector('.IjbFje');
+              const hasActiveBorder =
+                styles.borderColor.includes('66, 133, 244') || // Google blue
+                participant.classList.contains('IjbFje') ||
+                participant.querySelector('.IjbFje');
 
               if (hasActiveBorder) {
-                speakerName = participant.getAttribute('data-self-name') ||
-                              participant.querySelector('[data-self-name]')?.getAttribute('data-self-name') ||
-                              null;
+                speakerName =
+                  participant.getAttribute('data-self-name') ||
+                  participant.querySelector('[data-self-name]')?.getAttribute('data-self-name') ||
+                  null;
                 break;
               }
             }
@@ -139,7 +166,16 @@ export class NativeSpeakerDetector extends EventEmitter {
         const container = document.body;
         observer.observe(container, {
           attributes: true,
-          attributeFilter: ['class', 'data-is-speaking', 'data-is-active-speaker', 'style'],
+          attributeFilter: [
+            'class',
+            'style',
+            'data-is-speaking',
+            'data-is-active-speaker',
+            // Teams v2 attributes
+            'data-stream-type',
+            'data-tid',
+            'aria-label',
+          ],
           childList: true,
           subtree: true,
         });
@@ -156,7 +192,7 @@ export class NativeSpeakerDetector extends EventEmitter {
 
         (window as any).__speakerObserver = observer;
       },
-      { platform: this.platform, selectors } as { platform: string; selectors: Record<string, string> }
+      { platform: this.platform, selectors } as { platform: string; selectors: Record<string, string> },
     );
 
     // Collecter les events périodiquement
@@ -231,18 +267,28 @@ export class NativeSpeakerDetector extends EventEmitter {
           }, selectors.activeSpeaker);
 
         case 'TEAMS':
-          return await this.page.evaluate((sel) => {
-            const active = document.querySelector(sel);
-            return active?.getAttribute('data-participant-name') || null;
-          }, selectors.activeSpeaker);
+          return await this.page.evaluate(
+            ({ activeSpeaker, participantName }) => {
+              const active = document.querySelector(activeSpeaker);
+              if (!active) return null;
+              // Try attribute first, then child element selectors
+              const name =
+                active.getAttribute('data-participant-name') ||
+                active.getAttribute('aria-label') ||
+                active.querySelector(participantName)?.textContent?.trim() ||
+                null;
+              return name;
+            },
+            { activeSpeaker: selectors.activeSpeaker, participantName: selectors.participantName },
+          );
 
         case 'GOOGLE_MEET':
           return await this.page.evaluate(() => {
             // Google Meet: chercher l'élément avec la bordure bleue active
             const participants = document.querySelectorAll('[data-participant-id]');
             for (const p of participants) {
-              const hasBlueBorder = p.querySelector('.IjbFje') ||
-                                    getComputedStyle(p).boxShadow.includes('66, 133, 244');
+              const hasBlueBorder =
+                p.querySelector('.IjbFje') || getComputedStyle(p).boxShadow.includes('66, 133, 244');
               if (hasBlueBorder) {
                 return p.getAttribute('data-self-name') || null;
               }
@@ -292,10 +338,25 @@ export class NativeSpeakerDetector extends EventEmitter {
   }
 
   /**
-   * Arrête la détection
+   * Arrête la détection. Idempotent — safe to call multiple times.
    */
   async stop(): Promise<void> {
+    if (!this.isRunning) return;
     this.isRunning = false;
+
+    // Final collection of any pending events before stopping
+    try {
+      const events = await this.page.evaluate(() => {
+        const events = (window as any).__speakerEvents || [];
+        (window as any).__speakerEvents = [];
+        return events;
+      });
+      for (const event of events) {
+        this.handleSpeakerChange(event.speaker, event.timestamp);
+      }
+    } catch {
+      // Page may be closed — any uncollected events are lost (non-fatal)
+    }
 
     // Finaliser le dernier segment
     if (this.currentSpeaker) {
@@ -333,9 +394,9 @@ export class NativeSpeakerDetector extends EventEmitter {
    * Associe les segments audio avec les speakers détectés
    */
   matchAudioWithSpeakers(
-    audioSegments: Array<{ text: string; startTime: number; endTime: number }>
+    audioSegments: Array<{ text: string; startTime: number; endTime: number }>,
   ): Array<{ text: string; startTime: number; endTime: number; speaker: string }> {
-    return audioSegments.map(segment => {
+    return audioSegments.map((segment) => {
       // Trouver le speaker actif au moment de ce segment
       const matchingSpeaker = this.speakerHistory.find((s, index) => {
         const nextSpeaker = this.speakerHistory[index + 1];
@@ -354,9 +415,6 @@ export class NativeSpeakerDetector extends EventEmitter {
 /**
  * Factory function
  */
-export function createSpeakerDetector(
-  page: Page,
-  platform: 'ZOOM' | 'TEAMS' | 'GOOGLE_MEET'
-): NativeSpeakerDetector {
+export function createSpeakerDetector(page: Page, platform: 'ZOOM' | 'TEAMS' | 'GOOGLE_MEET'): NativeSpeakerDetector {
   return new NativeSpeakerDetector(page, platform);
 }

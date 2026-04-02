@@ -11,14 +11,17 @@ import { CHAT_POLL_INTERVAL_MS } from '@aramis/shared';
 import type { MeetingPlatform, ChatMessageData } from '@aramis/shared';
 
 // Platform-specific chat selectors
-const CHAT_SELECTORS: Record<string, {
-  messageContainer: string;
-  senderName: string;
-  messageText: string;
-  altContainer: string;
-  altSender: string;
-  altMessage: string;
-}> = {
+const CHAT_SELECTORS: Record<
+  string,
+  {
+    messageContainer: string;
+    senderName: string;
+    messageText: string;
+    altContainer: string;
+    altSender: string;
+    altMessage: string;
+  }
+> = {
   GOOGLE_MEET: {
     messageContainer: '[data-message-text]',
     senderName: '[data-sender-name]',
@@ -38,13 +41,17 @@ const CHAT_SELECTORS: Record<string, {
     altMessage: '.message-content',
   },
   TEAMS: {
-    messageContainer: '[data-tid="chat-pane-message"], .ts-message-list-item',
-    senderName: '[data-tid="message-author"], .ts-message-header-name',
-    messageText: '[data-tid="message-body"], .ts-message-body',
+    // Teams v2 (Fluent UI / React SPA) + classic Teams selectors
+    messageContainer:
+      '[data-tid="chat-pane-message"], [data-tid="message-wrapper"], [data-tid="chat-message"], .ts-message-list-item, .fui-ChatMessage',
+    senderName:
+      '[data-tid="message-author"], [data-tid="message-author-name"], .ts-message-header-name, .fui-ChatMessage__author',
+    messageText:
+      '[data-tid="message-body"], [data-tid="message-body-content"], .ts-message-body, .fui-ChatMessage__body',
     // Alternative selectors
-    altContainer: '.message-body-container',
-    altSender: '.message-author-text',
-    altMessage: '.message-body-content',
+    altContainer: '.message-body-container, [data-tid="chat-message-list"] > div',
+    altSender: '.message-author-text, [data-tid="message-author-name"]',
+    altMessage: '.message-body-content, [data-tid="message-body-content"]',
   },
 };
 
@@ -115,23 +122,41 @@ export class ChatCapturer {
    */
   private async openChatPanel(): Promise<void> {
     const chatButtonSelectors: Record<MeetingPlatform, string[]> = {
-      GOOGLE_MEET: [
-        '[aria-label*="Chat" i]',
-        '[aria-label*="chat" i]',
-        '[data-tooltip*="Chat" i]',
-      ],
-      ZOOM: [
-        '[aria-label*="Chat" i]',
-        '#chatButton',
-        '.chat-button',
-      ],
+      GOOGLE_MEET: ['[aria-label*="Chat" i]', '[aria-label*="chat" i]', '[data-tooltip*="Chat" i]'],
+      ZOOM: ['[aria-label*="Chat" i]', '#chatButton', '.chat-button'],
       TEAMS: [
         '[data-tid="chat-button"]',
+        '[data-tid="meeting-chat-button"]',
         '[aria-label*="Chat" i]',
       ],
     };
 
     const selectors = chatButtonSelectors[this.platform];
+
+    // For Teams, use page.evaluate() to click programmatically.
+    // The recording UI injects a blanket overlay at z-index 1998 that covers
+    // the chat button, causing Playwright actionability checks to fail.
+    if (this.platform === 'TEAMS') {
+      try {
+        const clicked = await this.page.evaluate((sels: string[]) => {
+          for (const sel of sels) {
+            const btn = document.querySelector<HTMLElement>(sel);
+            if (btn) {
+              btn.click();
+              return sel;
+            }
+          }
+          return null;
+        }, selectors);
+        if (clicked) {
+          logger.info(`Opened chat panel via JS click (${clicked})`);
+          return;
+        }
+      } catch {
+        // Fall through to standard approach
+      }
+    }
+
     for (const selector of selectors) {
       try {
         const btn = await this.page.$(selector);
@@ -166,10 +191,11 @@ export class ChatCapturer {
             let message = '';
 
             if (platform === 'GOOGLE_MEET') {
-              sender = container.getAttribute('data-sender-name') ||
-                       container.closest('[data-sender-name]')?.getAttribute('data-sender-name') || '';
-              message = container.getAttribute('data-message-text') ||
-                        container.textContent?.trim() || '';
+              sender =
+                container.getAttribute('data-sender-name') ||
+                container.closest('[data-sender-name]')?.getAttribute('data-sender-name') ||
+                '';
+              message = container.getAttribute('data-message-text') || container.textContent?.trim() || '';
             } else {
               const senderEl = container.querySelector(selectors.senderName);
               const messageEl = container.querySelector(selectors.messageText);
@@ -199,7 +225,7 @@ export class ChatCapturer {
 
           return results;
         },
-        { selectors, platform: this.platform }
+        { selectors, platform: this.platform },
       );
 
       // Deduplicate and store new messages
