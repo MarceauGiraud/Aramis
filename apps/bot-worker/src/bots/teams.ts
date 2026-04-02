@@ -300,20 +300,16 @@ export class TeamsBot extends BaseMeetingBot {
           '[aria-label*="personne" i]',
         ];
 
+        // Use page.evaluate() for the click to bypass the recording overlay
+        // (app-layout-area--main at z-index 1999 intercepts Playwright clicks)
         let panelOpened = false;
-        for (const selector of rosterBtnSelectors) {
-          try {
-            const btn = await this.page.$(selector);
-            if (btn) {
-              await btn.click();
-              await this.sleep(1000);
-              panelOpened = true;
-              break;
-            }
-          } catch {
-            // try next selector
-          }
-        }
+        const allSelectors = rosterBtnSelectors.join(', ');
+        panelOpened = await this.page.evaluate((sels) => {
+          const btn = document.querySelector(sels) as HTMLElement | null;
+          if (btn) { btn.click(); return true; }
+          return false;
+        }, allSelectors).catch(() => false);
+        if (panelOpened) await this.sleep(1500);
 
         if (panelOpened) {
           const names = await this.page.evaluate(() => {
@@ -342,18 +338,11 @@ export class TeamsBot extends BaseMeetingBot {
             return results;
           });
 
-          // Close the roster panel by clicking the button again
-          for (const selector of rosterBtnSelectors) {
-            try {
-              const btn = await this.page.$(selector);
-              if (btn) {
-                await btn.click();
-                break;
-              }
-            } catch {
-              // ignore
-            }
-          }
+          // Close the roster panel via JS click (bypasses overlay)
+          await this.page.evaluate((sels) => {
+            const btn = document.querySelector(sels) as HTMLElement | null;
+            if (btn) btn.click();
+          }, allSelectors).catch(() => {});
 
           if (names.length > 0) {
             const unique = Array.from(new Set(names));

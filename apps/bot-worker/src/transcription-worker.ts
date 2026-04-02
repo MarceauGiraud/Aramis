@@ -5,11 +5,12 @@
  * Accepts an optional `provider` field in job data; defaults to 'deepgram'.
  */
 
-import { Worker } from 'bullmq';
+import { Worker, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { prisma } from '@aramis/database';
 import { QUEUE_NAMES, TRANSCRIPTION_PROVIDERS } from '@aramis/shared';
 import { createTranscriptionProvider } from './lib/transcription/provider-factory';
+import { SpeakerReconciler, DomSpeakerEvent } from './lib/speaker-reconciler';
 import { logger } from './lib/logger';
 
 export interface TranscriptionJobData {
@@ -22,6 +23,8 @@ export interface TranscriptionJobData {
   language?: string;
   /** Provider-specific model name */
   model?: string;
+  /** DOM-detected speaker timeline for reconciliation with diarization labels */
+  speakerHistory?: DomSpeakerEvent[];
 }
 
 export function createTranscriptionWorker(redis: IORedis) {
@@ -35,13 +38,33 @@ export function createTranscriptionWorker(redis: IORedis) {
         provider: providerName = TRANSCRIPTION_PROVIDERS.DEEPGRAM,
         language,
         model,
+        speakerHistory,
       } = job.data;
 
       logger.info(`Processing transcription job ${job.id} for meeting ${meetingId} using ${providerName}`);
 
-      // Create transcript record
-      const transcript = await prisma.transcript.create({
-        data: {
+      // Find any existing transcript for this meeting (live transcript to replace).
+      // We do NOT delete it yet — the old transcript stays until the batch succeeds.
+      const existingTranscriptIds: string[] = [];
+      try {
+        const existing = await prisma.transcript.findMany({
+          where: { meetingId },
+          select: { id: true },
+        });
+        existingTranscriptIds.push(...existing.map((t) => t.id));
+      } catch (lookupErr) {
+        logger.warn(`Lookup of existing transcripts failed (non-fatal): ${lookupErr}`);
+      }
+
+      // Create or update transcript record (live transcription may have already created one)
+      const transcript = await prisma.transcript.upsert({
+        where: {
+          meetingId_provider: { meetingId, provider: providerName },
+        },
+        update: {
+          status: 'PROCESSING',
+        },
+        create: {
           meetingId,
           status: 'PROCESSING',
           provider: providerName,
@@ -62,16 +85,36 @@ export function createTranscriptionWorker(redis: IORedis) {
           diarize: true,
         });
 
+        // Reconcile anonymous diarization labels with real names from DOM detection
+        let speakerNameMapping: Map<string, string> | null = null;
+        if (speakerHistory && speakerHistory.length > 0) {
+          try {
+            const reconciler = new SpeakerReconciler();
+            const mapping = reconciler.reconcile(result.segments, speakerHistory);
+            if (mapping.labelToName.size > 0) {
+              speakerNameMapping = mapping.labelToName;
+              logger.info(
+                `Speaker reconciliation for meeting ${meetingId}: ` +
+                  `mapped ${mapping.labelToName.size}/${result.speakers.length} labels`,
+              );
+            }
+          } catch (error) {
+            logger.warn(`Speaker reconciliation failed (non-fatal): ${error}`);
+          }
+        }
+
         // Create speakers
         const speakerMap = new Map<string, string>();
         for (const speakerLabel of result.speakers) {
+          const identifiedName = speakerNameMapping?.get(speakerLabel) ?? null;
           const speaker = await prisma.transcriptSpeaker.create({
             data: {
               transcriptId: transcript.id,
               label: speakerLabel,
-              segmentCount: result.segments.filter(s => s.speaker === speakerLabel).length,
+              identifiedName,
+              segmentCount: result.segments.filter((s) => s.speaker === speakerLabel).length,
               totalDuration: result.segments
-                .filter(s => s.speaker === speakerLabel)
+                .filter((s) => s.speaker === speakerLabel)
                 .reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
             },
           });
@@ -122,6 +165,34 @@ export function createTranscriptionWorker(redis: IORedis) {
           },
         });
 
+        // Batch transcript succeeded — now delete the old live transcript(s).
+        // Guard: if batch produced 0 segments, keep old transcripts (they may
+        // contain useful per-participant live data).
+        if (result.segments.length === 0 && existingTranscriptIds.length > 0) {
+          logger.warn(
+            `Batch transcription for meeting ${meetingId} produced 0 segments — ` +
+              `keeping ${existingTranscriptIds.length} existing transcript(s)`,
+          );
+        }
+
+        for (const oldId of existingTranscriptIds) {
+          if (result.segments.length === 0) break; // skip deletion when batch is empty
+          if (oldId === transcript.id) continue; // skip the one we just created
+          try {
+            await prisma.$transaction([
+              prisma.transcriptWord.deleteMany({
+                where: { segment: { transcriptId: oldId } },
+              }),
+              prisma.transcriptSegment.deleteMany({ where: { transcriptId: oldId } }),
+              prisma.transcriptSpeaker.deleteMany({ where: { transcriptId: oldId } }),
+              prisma.transcript.delete({ where: { id: oldId } }),
+            ]);
+            logger.info(`Deleted old transcript ${oldId} after successful batch replacement`);
+          } catch (deleteErr) {
+            logger.warn(`Failed to delete old transcript ${oldId} (non-fatal): ${deleteErr}`);
+          }
+        }
+
         // Update recording status
         await prisma.recording.update({
           where: { id: recordingId },
@@ -130,8 +201,22 @@ export function createTranscriptionWorker(redis: IORedis) {
 
         logger.info(
           `Transcription complete for meeting ${meetingId}: ${result.segments.length} segments, ` +
-          `${result.speakers.length} speakers`
+            `${result.speakers.length} speakers`,
         );
+
+        // Queue summary generation only if there are segments to summarize
+        if (result.segments.length === 0) {
+          logger.warn(`Batch transcription produced 0 segments for ${meetingId} — skipping summary`);
+        } else {
+          const summaryQueue = new Queue(QUEUE_NAMES.SUMMARY, { connection: redis });
+          await summaryQueue.add('generate-summary', {
+            meetingId,
+            transcriptId: transcript.id,
+          });
+          await summaryQueue.close();
+
+          logger.info(`Summary job queued for meeting ${meetingId}`);
+        }
 
         return {
           transcriptId: transcript.id,
@@ -158,7 +243,7 @@ export function createTranscriptionWorker(redis: IORedis) {
     {
       connection: redis,
       concurrency: parseInt(process.env.TRANSCRIPTION_CONCURRENCY || '2'),
-    }
+    },
   );
 
   worker.on('completed', (job) => {
