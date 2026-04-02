@@ -281,6 +281,52 @@ export default function MeetingDetailPage() {
     }
   };
 
+  const [killLoading, setKillLoading] = useState(false);
+  const [rejoinLoading, setRejoinLoading] = useState(false);
+
+  const handleKill = async () => {
+    if (!confirm('Forcer le bot a quitter le meeting ?')) return;
+    setKillLoading(true);
+    try {
+      await fetch(`/api/bots/${params.id}/leave`, { method: 'POST' });
+      // Refresh meeting data after a short delay
+      setTimeout(async () => {
+        const res = await fetch(`/api/meetings/${params.id}`);
+        if (res.ok) setMeeting(await res.json());
+        setKillLoading(false);
+      }, 2000);
+    } catch {
+      setKillLoading(false);
+    }
+  };
+
+  const handleRejoin = async () => {
+    if (!meeting) return;
+    setRejoinLoading(true);
+    try {
+      // Reset meeting status and create a new bot job
+      const res = await fetch(`/api/bots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meeting_url: meeting.meetingUrl }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Redirect to new meeting if different ID, or refresh
+        if (data.id && data.id !== meeting.id) {
+          router.push(`/dashboard/meetings/${data.id}`);
+        } else {
+          const refreshRes = await fetch(`/api/meetings/${params.id}`);
+          if (refreshRes.ok) setMeeting(await refreshRes.json());
+        }
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setRejoinLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -347,25 +393,48 @@ export default function MeetingDetailPage() {
                 {platformNames[meeting.platform]} - {formatDate(meeting.scheduledStart)}
               </p>
             </div>
-            {/* Pause/Resume buttons */}
-            {meeting.status === 'RECORDING' && (
-              <div className="flex gap-2">
+            {/* Action buttons */}
+            <div className="flex gap-2">
+              {/* Pause/Resume - only during recording */}
+              {meeting.status === 'RECORDING' && (
+                <>
+                  <button
+                    onClick={handlePause}
+                    disabled={pauseLoading}
+                    className="px-4 py-2 text-sm font-medium text-yellow-700 bg-yellow-100 rounded-lg hover:bg-yellow-200 disabled:opacity-50"
+                  >
+                    {pauseLoading ? '...' : 'Pause'}
+                  </button>
+                  <button
+                    onClick={handleResume}
+                    disabled={pauseLoading}
+                    className="px-4 py-2 text-sm font-medium text-green-700 bg-green-100 rounded-lg hover:bg-green-200 disabled:opacity-50"
+                  >
+                    {pauseLoading ? '...' : 'Reprendre'}
+                  </button>
+                </>
+              )}
+              {/* Kill - when bot is active */}
+              {['JOINING', 'WAITING', 'RECORDING'].includes(meeting.status) && (
                 <button
-                  onClick={handlePause}
-                  disabled={pauseLoading}
-                  className="px-4 py-2 text-sm font-medium text-yellow-700 bg-yellow-100 rounded-lg hover:bg-yellow-200 disabled:opacity-50"
+                  onClick={handleKill}
+                  disabled={killLoading}
+                  className="px-4 py-2 text-sm font-medium text-red-700 bg-red-100 rounded-lg hover:bg-red-200 disabled:opacity-50"
                 >
-                  {pauseLoading ? '...' : 'Pause'}
+                  {killLoading ? '...' : 'Kill Bot'}
                 </button>
+              )}
+              {/* Rejoin - when bot has finished or failed */}
+              {['COMPLETED', 'FAILED', 'CANCELLED'].includes(meeting.status) && (
                 <button
-                  onClick={handleResume}
-                  disabled={pauseLoading}
-                  className="px-4 py-2 text-sm font-medium text-green-700 bg-green-100 rounded-lg hover:bg-green-200 disabled:opacity-50"
+                  onClick={handleRejoin}
+                  disabled={rejoinLoading}
+                  className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-100 rounded-lg hover:bg-blue-200 disabled:opacity-50"
                 >
-                  {pauseLoading ? '...' : 'Reprendre'}
+                  {rejoinLoading ? '...' : 'Rejoin'}
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       </header>
