@@ -506,6 +506,16 @@ export class TeamsBot extends BaseMeetingBot {
     // This avoids losing content while the UI setup steps run (~25s).
     await this.startRecording();
 
+    // Verify the microphone is still muted after the join transition.
+    // Teams may re-enable the mic during the join, which creates a feedback
+    // loop — PulseAudio-captured meeting audio is sent back as mic input.
+    await this.ensureMicrophoneMuted();
+
+    // Wait for WebRTC audio connections to establish before proceeding.
+    // Without this, FFmpeg audio capture (via PulseAudio) starts before
+    // Teams has connected audio, resulting in silence at the beginning.
+    await this.waitForWebRTCReady();
+
     // Wait for the meeting UI to be fully rendered.
     await this.waitForMeetingUIReady();
 
@@ -523,6 +533,78 @@ export class TeamsBot extends BaseMeetingBot {
     // removes the setup period (toolbars, layout switching, etc.).
     this.meetingContentStartTime = Date.now();
     logger.info('Meeting content starts — UI ready, recording already running');
+  }
+
+  /**
+   * Verify the microphone is muted after joining the meeting.
+   *
+   * Teams may re-enable the mic during the join transition even though it was
+   * muted on the pre-join screen.  An unmuted mic creates a feedback loop:
+   * meeting audio captured by PulseAudio is sent back into the meeting as
+   * microphone input.
+   *
+   * Uses page.evaluate() to check and click in-meeting mic toggle buttons,
+   * bypassing any overlay that may intercept Playwright clicks.
+   */
+  private async ensureMicrophoneMuted(): Promise<void> {
+    if (!this.page) return;
+
+    try {
+      const reMuted = await this.page.evaluate(() => {
+        // In-meeting mic toggle selectors (different from pre-join selectors)
+        const selectors = [
+          '[data-tid="toggle-mute"]',
+          '[data-tid="toggle-microphone"]',
+          '[data-tid="prejoin-mic-toggle"]',
+          '[aria-label*="Mute microphone" i]',
+          '[aria-label*="Désactiver le micro" i]',
+        ];
+
+        for (const sel of selectors) {
+          const btn = document.querySelector(sel) as HTMLElement | null;
+          if (!btn) continue;
+
+          const ariaPressed = btn.getAttribute('aria-pressed');
+          const ariaChecked = btn.getAttribute('aria-checked');
+          const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+
+          // Mic is unmuted if aria-pressed="true" / aria-checked="true"
+          // or the label says "Mute" (meaning it's currently on).
+          // Conversely, "Unmute" or aria-pressed="false" means already muted.
+          const isUnmuted =
+            ariaPressed === 'true' ||
+            ariaChecked === 'true' ||
+            (ariaLabel.includes('mute') &&
+              !ariaLabel.includes('unmute') &&
+              !ariaLabel.includes('activer'));
+
+          if (isUnmuted) {
+            btn.click();
+            return true; // re-muted
+          }
+
+          // If we found a button and it indicates muted state, no action needed
+          if (
+            ariaPressed === 'false' ||
+            ariaChecked === 'false' ||
+            ariaLabel.includes('unmute') ||
+            ariaLabel.includes('activer le micro')
+          ) {
+            return false; // already muted
+          }
+        }
+
+        return false; // no button found or already muted
+      });
+
+      if (reMuted) {
+        logger.warn('Microphone was unmuted after join transition — re-muted to prevent feedback loop');
+      } else {
+        logger.info('Microphone confirmed muted after join');
+      }
+    } catch (error) {
+      logger.warn(`Failed to verify microphone mute state (non-fatal): ${error}`);
+    }
   }
 
   /**

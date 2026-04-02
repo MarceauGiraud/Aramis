@@ -215,6 +215,11 @@ export abstract class BaseMeetingBot {
       env: {
         ...process.env,
         DISPLAY: display,
+        // Force Chrome to output audio to this bot's dedicated PulseAudio sink,
+        // avoiding the race condition where pactl set-default-sink is global.
+        PULSE_SINK: this.config.audioSource?.replace('.monitor', '') || 'virtual_speaker_99',
+        // Prevent Chrome from using any real microphone input (avoids feedback loop)
+        PULSE_SOURCE: 'virtual_silence',
       },
       args: [
         '--incognito',
@@ -248,12 +253,14 @@ export abstract class BaseMeetingBot {
         // Disable CSP to allow our binary WebSocket (ws://localhost:8765)
         // for per-participant audio transport. Without this, Teams and Meet
         // block WebSocket connections to localhost via Content-Security-Policy.
-        '--disable-features=IsolateOrigins,BlockInsecurePrivateNetworkRequests',
+        '--disable-features=IsolateOrigins,BlockInsecurePrivateNetworkRequests,AudioServiceSandbox',
         // Teams v2 SPA requires SharedArrayBuffer for its multi-threaded architecture.
         // Enable it without requiring cross-origin isolation headers.
         '--enable-features=SharedArrayBuffer',
         // PulseAudio integration for Teams audio capture
         '--use-pulseaudio',
+        '--enable-webrtc-capture-audio',
+        '--audio-buffer-size=2048',
         '--disable-background-timer-throttling',
         '--disable-external-intent-requests',
         // Do NOT use --disable-web-security — Google Meet detects it.
