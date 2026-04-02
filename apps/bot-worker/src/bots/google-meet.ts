@@ -266,11 +266,14 @@ export class GoogleMeetBot extends BaseMeetingBot {
       case 'ERROR_PAGE':
         throw new JoinError('Google Meet: Error page — meeting may not exist', true);
       case 'IN_MEETING':
-        // Rare but possible (e.g. rejoining)
-        logger.info('Already in meeting — skipping join steps');
+        // Rare but possible (e.g. rejoining). Still need to configure UI.
+        logger.info('Already in meeting — skipping join steps, configuring UI');
         this.joinedSuccessfully = true;
         this.joinedAt = new Date();
+        await this.turnOffCamera();
+        await this.turnOffMicrophone();
         await this.startRecording();
+        this.meetingContentStartTime = Date.now();
         return;
       case 'UNKNOWN':
         // Give it a moment, then re-check

@@ -205,32 +205,33 @@ export class TeamsBot extends BaseMeetingBot {
    * Teams uses various JSON structures; we look for arrays of participants
    * or explicit count fields.
    */
-  private extractParticipantCountFromSignal(data: any): number | null {
+  private extractParticipantCountFromSignal(data: any, depth = 0): number | null {
+    if (depth > 3 || !data || typeof data !== 'object') return null;
     try {
       // Structure 1: { participants: [...] } or { roster: [...] }
-      if (Array.isArray(data?.participants)) {
+      if (Array.isArray(data.participants)) {
         return data.participants.filter(
           (p: any) => p.state === 'Connected' || p.state === 'InLobby' || !p.state,
         ).length;
       }
-      if (Array.isArray(data?.roster)) {
+      if (Array.isArray(data.roster)) {
         return data.roster.filter(
           (p: any) => p.state === 'Connected' || !p.state,
         ).length;
       }
 
       // Structure 2: { participantCount: N } or { activeParticipantCount: N }
-      if (typeof data?.participantCount === 'number') return data.participantCount;
-      if (typeof data?.activeParticipantCount === 'number') return data.activeParticipantCount;
+      if (typeof data.participantCount === 'number') return data.participantCount;
+      if (typeof data.activeParticipantCount === 'number') return data.activeParticipantCount;
 
-      // Structure 3: Nested under body/content
-      const body = data?.body || data?.content || data?.resource;
+      // Structure 3: Nested under body/content/resource
+      const body = data.body || data.content || data.resource;
       if (body && typeof body === 'object') {
-        return this.extractParticipantCountFromSignal(body);
+        return this.extractParticipantCountFromSignal(body, depth + 1);
       }
 
       // Structure 4: { endpointDetails: [...] } — each entry is a connected endpoint
-      if (Array.isArray(data?.endpointDetails)) {
+      if (Array.isArray(data.endpointDetails)) {
         return data.endpointDetails.length;
       }
 

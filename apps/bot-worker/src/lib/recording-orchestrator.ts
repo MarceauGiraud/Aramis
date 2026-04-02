@@ -832,7 +832,7 @@ export class RecordingOrchestrator extends EventEmitter {
       let stderr = '';
 
       this.videoProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
+        stderr = (stderr + data.toString()).slice(-2000);
         if (stderr.includes('frame=')) {
           const match = stderr.match(/frame=\s*(\d+)/);
           if (match) {
@@ -1009,7 +1009,7 @@ export class RecordingOrchestrator extends EventEmitter {
       }
 
       this.audioProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
+        stderr = (stderr + data.toString()).slice(-2000);
       });
 
       this.audioProcess.on('error', (error) => {
@@ -1103,7 +1103,7 @@ export class RecordingOrchestrator extends EventEmitter {
       }
 
       this.audioProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
+        stderr = (stderr + data.toString()).slice(-2000);
       });
 
       this.audioProcess.on('error', (error) => {
@@ -1240,7 +1240,7 @@ export class RecordingOrchestrator extends EventEmitter {
       let stderr = '';
 
       mergeProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
+        stderr = (stderr + data.toString()).slice(-2000);
       });
 
       mergeProcess.on('error', (error) => {
@@ -1315,7 +1315,7 @@ export class RecordingOrchestrator extends EventEmitter {
       let stderr = '';
 
       extractProcess.stderr?.on('data', (data) => {
-        stderr += data.toString();
+        stderr = (stderr + data.toString()).slice(-2000);
       });
 
       extractProcess.on('error', (error) => {

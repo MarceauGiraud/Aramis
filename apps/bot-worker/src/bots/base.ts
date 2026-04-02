@@ -377,8 +377,9 @@ export abstract class BaseMeetingBot {
     // Expose callback for per-participant audio chunks from browser (Google Meet only)
     if (this.config.platform === 'GOOGLE_MEET') {
       await this.page.exposeFunction('__aramisPerParticipantAudio', (csrcId: string, pcmBase64: string) => {
-        // Receiving per-participant audio proves humans are in the meeting
-        if (this.peakParticipantCount < 2) {
+        // Receiving per-participant audio proves humans are in the meeting.
+        // Guard with joinedSuccessfully to avoid arming zombie watchdog during lobby.
+        if (this.peakParticipantCount < 2 && this.joinedSuccessfully) {
           this.peakParticipantCount = 2;
         }
         if (this.perParticipantManager) {
@@ -943,10 +944,12 @@ export abstract class BaseMeetingBot {
         trimStartSeconds = undefined;
       }
 
-      // Compute effective duration after trimming
+      // Compute effective duration after trimming.
+      // trimEndSeconds is already the duration AFTER start trim
+      // (contentDurationMs - startTrimMs) / 1000, so don't subtract again.
       let effectiveDuration: number;
       if (trimEndSeconds !== undefined) {
-        effectiveDuration = trimEndSeconds - (trimStartSeconds ?? 0);
+        effectiveDuration = trimEndSeconds;
       } else {
         effectiveDuration = totalRecordingDurationSec - (trimStartSeconds ?? 0);
       }
@@ -1075,7 +1078,8 @@ export abstract class BaseMeetingBot {
         }
         this.botAloneSince = null;
         this.peakParticipantCount = Math.max(this.peakParticipantCount, participantCount);
-      } else if (participantCount <= 1 && this.peakParticipantCount > 1) {
+      } else if (participantCount >= 0 && participantCount <= 1 && this.peakParticipantCount > 1) {
+        // participantCount === -1 means "unknown" — skip watchdog to avoid false triggers
         // Was >1 before, now <=1 — humans left, start/check timer
         if (this.botAloneSince === null) {
           this.botAloneSince = Date.now();
