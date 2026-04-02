@@ -30,10 +30,14 @@ RUN pnpm install --frozen-lockfile
 # Copy source code
 COPY . .
 
-# Install Google Chrome (stable channel) for Teams video codec support.
-# Chromium lacks proprietary H.264/AAC codecs, causing Teams participant
-# video to appear as "camera off". Chrome for Testing includes them.
-RUN pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome
+# Install Google Chrome for Teams video codec support (H.264/AAC).
+# Chrome for Testing is only available on x86_64. On ARM64 (Apple Silicon),
+# the Playwright base image already bundles Chromium with codec support.
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome; \
+    else \
+      echo "ARM64 detected — using bundled Chromium (Chrome not available on ARM64)"; \
+    fi
 
 # Generate Prisma client and build all packages in a single layer
 RUN pnpm --filter @aramis/database generate \
