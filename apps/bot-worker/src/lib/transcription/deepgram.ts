@@ -17,7 +17,7 @@ export type { TranscriptSegment, TranscriptWord, TranscriptionResult };
 
 export interface DeepgramConfig {
   apiKey: string;
-  model?: 'nova-2' | 'nova' | 'enhanced' | 'base';
+  model?: 'nova-3' | 'nova-2' | 'nova' | 'enhanced' | 'base';
   language?: string;
   diarize?: boolean;
   punctuate?: boolean;
@@ -42,8 +42,8 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
     super();
     this.config = {
       apiKey: config?.apiKey || process.env.DEEPGRAM_API_KEY || '',
-      model: config?.model || 'nova-2',
-      language: config?.language || 'en',
+      model: config?.model || 'nova-3',
+      language: config?.language || undefined,
       diarize: config?.diarize ?? true,
       punctuate: config?.punctuate ?? true,
       utterances: config?.utterances ?? true,
@@ -67,17 +67,14 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
 
     const audioBuffer = fs.readFileSync(audioPath);
 
-    const { result, error } = await this.client.listen.prerecorded.transcribeFile(
-      audioBuffer,
-      {
-        model: (options?.model as DeepgramConfig['model']) || this.config.model,
-        language: options?.language || this.config.language,
-        diarize: options?.diarize ?? this.config.diarize,
-        punctuate: this.config.punctuate,
-        utterances: this.config.utterances,
-        smart_format: true,
-      }
-    );
+    const { result, error } = await this.client.listen.prerecorded.transcribeFile(audioBuffer, {
+      model: (options?.model as DeepgramConfig['model']) || this.config.model,
+      language: options?.language || this.config.language,
+      diarize: options?.diarize ?? this.config.diarize,
+      punctuate: this.config.punctuate,
+      utterances: this.config.utterances,
+      smart_format: true,
+    });
 
     if (error) {
       throw new Error(`Transcription failed: ${error.message}`);
@@ -90,19 +87,42 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
    * Transcribe from URL
    */
   async transcribeUrl(audioUrl: string, options?: TranscribeOptions): Promise<TranscriptionResult> {
-    logger.info(`Transcribing URL: ${audioUrl}`);
-
-    const { result, error } = await this.client.listen.prerecorded.transcribeUrl(
-      { url: audioUrl },
-      {
-        model: (options?.model as DeepgramConfig['model']) || this.config.model,
-        language: options?.language || this.config.language,
-        diarize: options?.diarize ?? this.config.diarize,
-        punctuate: this.config.punctuate,
-        utterances: this.config.utterances,
-        smart_format: true,
+    // If the URL is an internal s3:// URL, convert to a presigned HTTP URL
+    // so Deepgram can access it.
+    let resolvedUrl = audioUrl;
+    if (audioUrl.startsWith('s3://')) {
+      try {
+        const { getPresignedUrl } = await import('../storage');
+        const key = audioUrl.slice(5); // remove "s3://"
+        const slashIndex = key.indexOf('/');
+        const objectKey = slashIndex !== -1 ? key.slice(slashIndex + 1) : key;
+        resolvedUrl = await getPresignedUrl(objectKey);
+        logger.info(`Resolved s3:// URL to presigned URL for Deepgram`);
+      } catch (err) {
+        logger.warn(`Failed to resolve s3:// URL, using as-is: ${err}`);
       }
-    );
+    }
+
+    logger.info(`Transcribing URL: ${resolvedUrl.substring(0, 80)}...`);
+
+    // Build batch options — for batch, use detect_language=true instead of language='multi'
+    const batchOptions: Record<string, any> = {
+      model: (options?.model as DeepgramConfig['model']) || this.config.model,
+      diarize: options?.diarize ?? this.config.diarize,
+      punctuate: this.config.punctuate,
+      utterances: this.config.utterances,
+      paragraphs: true,
+      smart_format: true,
+    };
+
+    const lang = options?.language || this.config.language;
+    if (!lang || lang === 'multi' || lang === 'detect') {
+      batchOptions.detect_language = true;
+    } else {
+      batchOptions.language = lang;
+    }
+
+    const { result, error } = await this.client.listen.prerecorded.transcribeUrl({ url: resolvedUrl }, batchOptions);
 
     if (error) {
       throw new Error(`Transcription failed: ${error.message}`);
@@ -115,9 +135,13 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
    * Start live transcription session implementing LiveTranscriptionSession interface
    */
   async startLiveTranscription(options?: LiveTranscriptionOptions): Promise<LiveTranscriptionSession> {
-    const connection = this.client.listen.live({
-      model: (options?.model as DeepgramConfig['model']) || this.config.model,
-      language: options?.language || this.config.language,
+    const lang = options?.language || this.config.language;
+    const model = (options?.model as DeepgramConfig['model']) || this.config.model || 'nova-3';
+
+    // Build live transcription options. If no explicit language is provided,
+    // use Deepgram's automatic language detection instead of hardcoding French.
+    const liveOptions: Record<string, any> = {
+      model,
       diarize: options?.diarize ?? this.config.diarize,
       punctuate: this.config.punctuate,
       interim_results: options?.interimResults ?? true,
@@ -126,26 +150,78 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
       encoding: options?.encoding || 'linear16',
       sample_rate: options?.sampleRate || 16000,
       channels: options?.channels || 1,
-    });
+    };
+
+    if (lang && lang !== 'multi' && lang !== 'detect') {
+      liveOptions.language = lang;
+    } else {
+      liveOptions.detect_language = true;
+    }
+
+    const connection = this.client.listen.live(liveOptions as any);
 
     const session = new EventEmitter() as EventEmitter & LiveTranscriptionSession;
 
+    let connectionReady = false;
+    let bytesSent = 0;
+    let chunksSent = 0;
+
     // Implement send and close
     session.send = (audioData: Buffer) => {
-      connection.send(audioData);
+      if (!connectionReady) {
+        // Drop audio data until the WebSocket is open - the Deepgram SDK's
+        // internal sendBuffer is never flushed, so buffering here is pointless
+        return;
+      }
+      bytesSent += audioData.byteLength;
+      chunksSent++;
+      if (chunksSent === 1) {
+        logger.info(`Deepgram: first audio chunk sent (${audioData.byteLength} bytes)`);
+      } else if (chunksSent % 500 === 0) {
+        logger.info(`Deepgram: sent ${chunksSent} chunks, ${(bytesSent / 1024).toFixed(0)} KB total`);
+      }
+      // Send as ArrayBuffer — copy into a correctly-sized ArrayBuffer to avoid
+      // Node.js Buffer pool issues where .buffer is larger than the actual data
+      const ab = audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength);
+      connection.send(ab);
     };
 
     session.close = () => {
-      connection.finish();
+      logger.info(`Deepgram: closing connection after ${chunksSent} chunks, ${(bytesSent / 1024).toFixed(0)} KB total`);
+      connection.requestClose();
     };
 
+    // Set up all event handlers before waiting for the connection to open
     connection.on(LiveTranscriptionEvents.Open, () => {
-      logger.info('Deepgram live connection opened');
+      connectionReady = true;
+      logger.info('Deepgram live connection opened and ready to receive audio');
       this.emit('open');
+    });
+
+    // Log ALL Deepgram events for diagnostics
+    connection.on(LiveTranscriptionEvents.Metadata, (data) => {
+      logger.info(`Deepgram metadata: requestId=${data.request_id}, model=${data.model_info?.name}`);
+    });
+    connection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+      logger.debug('Deepgram: speech detected');
+    });
+    connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+      logger.debug('Deepgram: utterance ended');
+    });
+    connection.on(LiveTranscriptionEvents.Unhandled, (data) => {
+      logger.warn(`Deepgram unhandled event: ${JSON.stringify(data).substring(0, 200)}`);
     });
 
     connection.on(LiveTranscriptionEvents.Transcript, (data) => {
       const transcript = data.channel?.alternatives?.[0];
+      const text = transcript?.transcript || '';
+      if (text) {
+        logger.info(
+          `Deepgram transcript: is_final=${data.is_final}, speech_final=${data.speech_final}, text="${text.substring(0, 100)}", confidence=${transcript?.confidence || 0}`,
+        );
+      } else {
+        logger.debug(`Deepgram empty transcript event: is_final=${data.is_final}, speech_final=${data.speech_final}`);
+      }
       if (transcript && transcript.transcript) {
         const segment: TranscriptSegment = {
           text: transcript.transcript,
@@ -169,14 +245,44 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
 
     connection.on(LiveTranscriptionEvents.Error, (error) => {
       logger.error('Deepgram error:', error);
-      session.emit('error', error instanceof Error ? error : new Error(String(error)));
-      this.emit('error', error);
+      // Do NOT emit 'error' on the session EventEmitter — if no listener is
+      // attached, Node.js treats unhandled 'error' events as fatal exceptions
+      // and crashes the entire process. We log the error above instead.
     });
 
     connection.on(LiveTranscriptionEvents.Close, () => {
+      connectionReady = false;
       logger.info('Deepgram connection closed');
       session.emit('close');
       this.emit('close');
+    });
+
+    // Wait for the WebSocket connection to actually open before returning.
+    // The Deepgram SDK's internal sendBuffer is never flushed, so data sent
+    // before the connection opens is permanently lost. By awaiting here, we
+    // ensure pipeAudioStream() is only called after the connection is ready.
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Deepgram WebSocket connection timed out after 10s'));
+      }, 10000);
+
+      if (connectionReady) {
+        clearTimeout(timeout);
+        resolve();
+        return;
+      }
+
+      // The Open event was already registered above and sets connectionReady=true.
+      // Listen for it again here just to resolve this promise.
+      connection.once(LiveTranscriptionEvents.Open, () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+
+      connection.once(LiveTranscriptionEvents.Error, (error) => {
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
 
     return session;
@@ -195,12 +301,31 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
     let totalConfidence = 0;
     let segmentCount = 0;
 
-    // If utterances are available, use them
-    if (result.results?.utterances) {
+    // Prefer paragraphs (grouped by speaker) over raw utterances
+    const paragraphs = firstAlt.paragraphs?.paragraphs;
+    if (paragraphs && paragraphs.length > 0) {
+      for (const para of paragraphs) {
+        const speaker = para.speaker !== undefined ? `Speaker ${para.speaker + 1}` : undefined;
+
+        if (speaker) speakerSet.add(speaker);
+
+        const text = (para.sentences || []).map((s: any) => s.text).join(' ');
+
+        segments.push({
+          text,
+          startTime: para.start,
+          endTime: para.end,
+          confidence: firstAlt.confidence || 0,
+          speaker,
+        });
+
+        totalConfidence += firstAlt.confidence || 0;
+        segmentCount++;
+      }
+    } else if (result.results?.utterances) {
+      // Fall back to utterances
       for (const utterance of result.results.utterances) {
-        const speaker = utterance.speaker !== undefined
-          ? `Speaker ${utterance.speaker + 1}`
-          : undefined;
+        const speaker = utterance.speaker !== undefined ? `Speaker ${utterance.speaker + 1}` : undefined;
 
         if (speaker) speakerSet.add(speaker);
 
@@ -210,12 +335,6 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
           endTime: utterance.end,
           confidence: utterance.confidence,
           speaker,
-          words: (utterance.words || []).map((w: any) => ({
-            text: w.word || w.punctuated_word,
-            startTime: w.start,
-            endTime: w.end,
-            confidence: w.confidence,
-          })),
         });
 
         totalConfidence += utterance.confidence;
@@ -227,9 +346,7 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
       let currentSegment: TranscriptSegment | null = null;
 
       for (const word of words) {
-        const speaker = word.speaker !== undefined
-          ? `Speaker ${word.speaker + 1}`
-          : undefined;
+        const speaker = word.speaker !== undefined ? `Speaker ${word.speaker + 1}` : undefined;
 
         if (speaker) speakerSet.add(speaker);
 
@@ -246,12 +363,14 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
             endTime: word.end,
             confidence: word.confidence,
             speaker,
-            words: [{
-              text: word.word || word.punctuated_word,
-              startTime: word.start,
-              endTime: word.end,
-              confidence: word.confidence,
-            }],
+            words: [
+              {
+                text: word.word || word.punctuated_word,
+                startTime: word.start,
+                endTime: word.end,
+                confidence: word.confidence,
+              },
+            ],
           };
         } else {
           currentSegment.text += ' ' + (word.word || word.punctuated_word);
@@ -277,7 +396,7 @@ export class DeepgramTranscriptionService extends EventEmitter implements Transc
 
     return {
       segments,
-      fullText: firstAlt.transcript || segments.map(s => s.text).join(' '),
+      fullText: firstAlt.transcript || segments.map((s) => s.text).join(' '),
       duration,
       language,
       speakers: Array.from(speakerSet),

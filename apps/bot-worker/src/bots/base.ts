@@ -123,6 +123,9 @@ export abstract class BaseMeetingBot {
   // Heartbeat interval
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
+  // Wakeup mechanism: allows WebSocket signals to interrupt the polling sleep
+  private wakeupResolve: (() => void) | null = null;
+
   /** Accumulated Teams captions from WebSocket signals */
   protected captionSegments: Array<{ userId: string; text: string; timestamp: number; isFinal: boolean }> = [];
 
@@ -153,12 +156,14 @@ export abstract class BaseMeetingBot {
     this.meetingSignal = signal;
     if (signal.type === 'MeetingStatusChange') {
       logger.info(`Meeting signal: ${signal.change}`);
+      this.triggerWakeup();
     } else if (signal.type === 'RosterUpdate') {
       this.lastRosterParticipantCount = signal.activeParticipantCount;
       if (signal.activeParticipantCount > this.peakParticipantCount) {
         this.peakParticipantCount = signal.activeParticipantCount;
       }
       logger.info(`Roster update: ${signal.activeParticipantCount} active (peak=${this.peakParticipantCount})`);
+      this.triggerWakeup();
     } else if (signal.type === 'DominantSpeaker') {
       this.dominantSpeakerStreamId = signal.streamId;
       logger.info(`Dominant speaker: stream ${signal.streamId}`);
@@ -185,6 +190,19 @@ export abstract class BaseMeetingBot {
       return; // Don't overwrite meetingSignal with this internal signal
     }
     // Store all signals - subclasses access via this.meetingSignal
+  }
+
+  private createWakeupPromise(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.wakeupResolve = resolve;
+    });
+  }
+
+  private triggerWakeup(): void {
+    if (this.wakeupResolve) {
+      this.wakeupResolve();
+      this.wakeupResolve = null;
+    }
   }
 
   getCaptionSegments(): Array<{ userId: string; text: string; timestamp: number; isFinal: boolean }> {
@@ -1127,7 +1145,11 @@ export abstract class BaseMeetingBot {
       // conditions: WebRTC disconnection, participant count dropping to 1,
       // "alone" UI indicators, kicked indicators, and URL changes.
 
-      await this.sleep(checkInterval);
+      const wakeup = this.createWakeupPromise();
+      await Promise.race([
+        this.sleep(checkInterval),
+        wakeup,
+      ]);
     }
   }
 
