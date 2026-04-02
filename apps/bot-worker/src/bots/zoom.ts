@@ -1,4 +1,4 @@
-import { BaseMeetingBot, BotConfig, BotOptions } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions, JoinError } from './base';
 import { logger } from '../lib/logger';
 
 /**
@@ -8,24 +8,63 @@ import { logger } from '../lib/logger';
  * Uses the Zoom Web Client (app.zoom.us/wc) for browser-based joining
  */
 export class ZoomBot extends BaseMeetingBot {
-  private joinedSuccessfully = false;
-  private joinedAt: Date | null = null;
   private lastKnownParticipantCount = 0;
 
   constructor(config: BotConfig, options?: BotOptions) {
     super({ ...config, platform: config.platform ?? 'ZOOM' }, options);
   }
 
+  /**
+   * Transform a Zoom meeting URL to use the web client path (/wc/join/),
+   * bypassing the desktop app launcher redirect.
+   *
+   *   zoom.us/j/MEETING_ID           -> zoom.us/wc/join/MEETING_ID
+   *   zoom.us/j/MEETING_ID?pwd=PWD   -> zoom.us/wc/join/MEETING_ID?pwd=PWD
+   *   us02web.zoom.us/j/123          -> us02web.zoom.us/wc/join/123
+   *   zoom.us/wc/join/123            -> (unchanged)
+   */
+  private transformToWebClientUrl(url: string): string {
+    try {
+      const parsed = new URL(url);
+      // Replace /j/ or /s/ with /wc/join/ if not already a web-client URL
+      if (!parsed.pathname.includes('/wc/')) {
+        parsed.pathname = parsed.pathname.replace(/\/(j|s)\//, '/wc/join/');
+      }
+      return parsed.toString();
+    } catch {
+      // If URL parsing fails, do a simple string replacement
+      return url.replace(/\/(j|s)\//, '/wc/join/');
+    }
+  }
+
   async join(): Promise<void> {
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.attemptJoin();
+        return;
+      } catch (error) {
+        if (error instanceof JoinError && error.retryable && attempt < MAX_ATTEMPTS) {
+          logger.warn(`Join attempt ${attempt}/${MAX_ATTEMPTS} failed: ${error.message}`);
+          // Reset page for retry
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async attemptJoin(): Promise<void> {
     if (!this.page) {
-      throw new Error('Page not initialized');
+      throw new JoinError('Page not initialized', false);
     }
 
-    logger.info(`Joining Zoom meeting: ${this.config.meetingUrl}`);
+    const webClientUrl = this.transformToWebClientUrl(this.config.meetingUrl);
+    logger.info(`Joining Zoom meeting: ${webClientUrl}`);
 
-    // Navigate to the meeting URL
-    await this.page.goto(this.config.meetingUrl, {
-      waitUntil: 'networkidle',
+    // Navigate to the web client URL (use domcontentloaded, Zoom loads lazily)
+    await this.page.goto(webClientUrl, {
+      waitUntil: 'domcontentloaded',
       timeout: 60000,
     });
 
@@ -33,7 +72,8 @@ export class ZoomBot extends BaseMeetingBot {
     await this.sleep(2000 + Math.random() * 2000);
     await this.takeDebugScreenshot('01_page_loaded');
 
-    // Handle "Join from Your Browser" flow
+    // Handle "Join from Your Browser" flow (fallback if URL transform did not
+    // fully bypass the interstitial)
     await this.handleBrowserJoin();
     await this.takeDebugScreenshot('02_after_browser_join');
 
@@ -78,13 +118,16 @@ export class ZoomBot extends BaseMeetingBot {
     const inMeeting = await this.checkStillInMeeting();
     if (!inMeeting) {
       await this.takeDebugScreenshot('07_join_failed');
-      throw new Error('Failed to join Zoom meeting');
+      throw new JoinError('Failed to join Zoom meeting', true);
     }
 
     this.joinedSuccessfully = true;
     this.joinedAt = new Date();
     logger.info('Successfully joined Zoom meeting');
     await this.takeDebugScreenshot('07_joined_successfully');
+
+    // Wait for WebRTC to establish connections before starting recording
+    await this.waitForWebRTCReady();
 
     // Start recording
     await this.startRecording();
@@ -121,12 +164,7 @@ export class ZoomBot extends BaseMeetingBot {
     }
 
     // Alternative: Look for "Launch Meeting" and wait for browser link
-    const launchSelectors = [
-      'text=Launch Meeting',
-      'text=Open Zoom',
-      '#launch-btn',
-      '[data-launch]',
-    ];
+    const launchSelectors = ['text=Launch Meeting', 'text=Open Zoom', '#launch-btn', '[data-launch]'];
 
     for (const selector of launchSelectors) {
       try {
@@ -403,29 +441,28 @@ export class ZoomBot extends BaseMeetingBot {
   private async waitForAdmission(): Promise<void> {
     if (!this.page) return;
 
-    const maxWaitTime = 5 * 60 * 1000; // 5 minutes
+    const maxWaitTime = this.options.waitingRoomTimeoutMs ?? 5 * 60 * 1000;
     const startTime = Date.now();
+
+    const deniedIndicators = [
+      'text=The host has denied your request',
+      'text=You cannot join this meeting',
+      'text=removed from this meeting',
+      'text=denied',
+    ];
+
+    const waitingIndicators = [
+      'text=Please wait, the meeting host will let you in soon',
+      'text=Waiting for the host',
+      'text=waiting room',
+      '.waiting-room',
+      '#waiting-room',
+    ];
 
     while (Date.now() - startTime < maxWaitTime) {
       // Check if denied
-      const deniedIndicators = [
-        'text=The host has denied your request',
-        'text=You cannot join this meeting',
-        'text=removed from this meeting',
-        'text=denied',
-      ];
-
-      for (const indicator of deniedIndicators) {
-        try {
-          const denied = await this.page.$(indicator);
-          if (denied) {
-            throw new Error('Bot was denied entry to the meeting');
-          }
-        } catch (e) {
-          if (e instanceof Error && e.message.includes('denied')) {
-            throw e;
-          }
-        }
+      if (await this.hasAnySelector(deniedIndicators)) {
+        throw new JoinError('Bot was denied entry to the meeting', false);
       }
 
       // Check if in meeting
@@ -436,28 +473,7 @@ export class ZoomBot extends BaseMeetingBot {
       }
 
       // Check if in waiting room
-      const waitingIndicators = [
-        'text=Please wait, the meeting host will let you in soon',
-        'text=Waiting for the host',
-        'text=waiting room',
-        '.waiting-room',
-        '#waiting-room',
-      ];
-
-      let isWaiting = false;
-      for (const indicator of waitingIndicators) {
-        try {
-          const waiting = await this.page.$(indicator);
-          if (waiting) {
-            isWaiting = true;
-            break;
-          }
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (!isWaiting) {
+      if (!(await this.hasAnySelector(waitingIndicators))) {
         return;
       }
 
@@ -468,20 +484,20 @@ export class ZoomBot extends BaseMeetingBot {
         const viewport = this.page.viewportSize() || { width: 1920, height: 1080 };
         await this.page.mouse.move(
           viewport.width / 2 + (Math.random() - 0.5) * 100,
-          viewport.height / 2 + (Math.random() - 0.5) * 100
+          viewport.height / 2 + (Math.random() - 0.5) * 100,
         );
       }
 
       await this.sleep(3000 + Math.random() * 2000);
     }
 
-    throw new Error('Timed out waiting to be admitted');
+    throw new JoinError('Timed out waiting to be admitted', true);
   }
 
   /**
    * Get participant count
    */
-  private async getParticipantCount(): Promise<number> {
+  protected async getParticipantCount(): Promise<number> {
     if (!this.page) return 0;
 
     try {
@@ -549,22 +565,15 @@ export class ZoomBot extends BaseMeetingBot {
       '[data-meeting-ended="true"]',
     ];
 
-    for (const indicator of endedIndicators) {
-      try {
-        const element = await this.page.$(indicator);
-        if (element) {
-          logger.info(`Meeting ended: found indicator ${indicator}`);
-          return true;
-        }
-      } catch {
-        // Ignore
-      }
+    if (await this.hasAnySelector(endedIndicators)) {
+      logger.info('Meeting ended: found ended indicator in DOM');
+      return true;
     }
 
     // Check URL
     const url = this.page.url();
     if (url.includes('zoom.us') && (url.includes('/postattendee') || url.includes('/leaveurl'))) {
-      logger.info(`Meeting ended: URL indicates meeting over`);
+      logger.info('Meeting ended: URL indicates meeting over');
       return true;
     }
 
@@ -586,10 +595,11 @@ export class ZoomBot extends BaseMeetingBot {
       logger.info(`Participant count updated: ${participantCount}`);
     }
 
-    // Only leave if others have left
+    // Signal that the meeting is over when bot is alone (caller handles leave)
     if (participantCount <= 1 && this.lastKnownParticipantCount > 1) {
-      logger.info(`Meeting ended: Bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`);
-      await this.leave();
+      logger.info(
+        `Meeting ended: Bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`,
+      );
       return true;
     }
 
@@ -614,22 +624,13 @@ export class ZoomBot extends BaseMeetingBot {
       '.meeting-info-container',
     ];
 
-    for (const indicator of meetingIndicators) {
-      try {
-        const element = await this.page.$(indicator);
-        if (element) {
-          return true;
-        }
-      } catch {
-        // Continue
-      }
+    if (await this.hasAnySelector(meetingIndicators)) {
+      return true;
     }
 
     // Check URL
     const url = this.page.url();
-    const inZoomMeeting = url.includes('zoom.us/wc') ||
-                          url.includes('zoom.us/j') ||
-                          url.includes('zoom.us/s');
+    const inZoomMeeting = url.includes('zoom.us/wc') || url.includes('zoom.us/j') || url.includes('zoom.us/s');
 
     if (this.joinedSuccessfully && inZoomMeeting) {
       return true;
@@ -656,40 +657,39 @@ export class ZoomBot extends BaseMeetingBot {
         '[data-tid="bo-invitation"]',
       ];
 
-      for (const selector of breakoutSelectors) {
-        const el = await this.page.$(selector);
-        if (el) {
-          logger.info('Breakout room invitation detected');
+      if (!(await this.hasAnySelector(breakoutSelectors))) {
+        return false;
+      }
 
-          // Pause recording during transition
-          if (this.recordingOrchestrator?.isRecording()) {
-            this.pauseRecording();
+      logger.info('Breakout room invitation detected');
+
+      // Pause recording during transition
+      if (this.recordingOrchestrator?.isRecording()) {
+        this.pauseRecording();
+      }
+
+      // Click join button
+      const joinSelectors = [
+        'button:has-text("Join")',
+        'button:has-text("Join Breakout Room")',
+        '.bo-room-invitation button',
+      ];
+
+      for (const joinSelector of joinSelectors) {
+        const joinBtn = await this.page.$(joinSelector);
+        if (joinBtn) {
+          await this.humanClick(joinSelector);
+          logger.info('Joined breakout room');
+
+          // Wait for transition
+          await this.sleep(3000);
+
+          // Resume recording
+          if (this.recordingOrchestrator?.isPaused()) {
+            this.resumeRecording();
           }
 
-          // Click join button
-          const joinSelectors = [
-            'button:has-text("Join")',
-            'button:has-text("Join Breakout Room")',
-            '.bo-room-invitation button',
-          ];
-
-          for (const joinSelector of joinSelectors) {
-            const joinBtn = await this.page.$(joinSelector);
-            if (joinBtn) {
-              await this.humanClick(joinSelector);
-              logger.info('Joined breakout room');
-
-              // Wait for transition
-              await this.sleep(3000);
-
-              // Resume recording
-              if (this.recordingOrchestrator?.isPaused()) {
-                this.resumeRecording();
-              }
-
-              return true;
-            }
-          }
+          return true;
         }
       }
     } catch (error) {

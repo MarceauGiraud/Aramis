@@ -1,29 +1,7 @@
-import { BaseMeetingBot, BotConfig, BotOptions, ActiveSpeaker, ParticipantInfo } from './base';
+import { BaseMeetingBot, BotConfig, BotOptions, JoinError, PageState } from './base';
+import { MeetUIController } from '../lib/meet-ui-controller';
 import { logger } from '../lib/logger';
 import { BOT_CONFIG } from '@aramis/shared';
-
-// -- Page state detection --------------------------------------------------
-
-type PageState =
-  | 'PRE_JOIN'
-  | 'IN_MEETING'
-  | 'WAITING_ROOM'
-  | 'LOGIN_REQUIRED'
-  | 'ACCESS_DENIED'
-  | 'ERROR_PAGE'
-  | 'UNKNOWN';
-
-// -- Error classification --------------------------------------------------
-
-class JoinError extends Error {
-  constructor(
-    message: string,
-    public readonly retryable: boolean,
-  ) {
-    super(message);
-    this.name = 'JoinError';
-  }
-}
 
 // -- Selector lists --------------------------------------------------------
 
@@ -40,12 +18,14 @@ const POPUP_SELECTORS = [
   'text=Autoriser',
   'button:has-text("Allow")',
   'button:has-text("Block")',
+  // "Do you want people to hear you?" permission modal
+  'button:has-text("Microphone allowed")',
+  'button:has-text("Camera and microphone allowed")',
+  // Gemini note-taking prompt close button
+  '[aria-label="Close dialog"]',
 ];
 
-const CAMERA_PROMPT_SELECTORS = [
-  'text=Use your camera',
-  'text=Utiliser votre caméra',
-];
+const CAMERA_PROMPT_SELECTORS = ['text=Use your camera', 'text=Utiliser votre caméra'];
 
 const NAME_INPUT_SELECTORS = [
   'input[placeholder="Your name"]',
@@ -103,11 +83,15 @@ const LOGIN_PAGE_INDICATORS = [
 const WAITING_ROOM_INDICATORS = [
   'text=Waiting for someone to let you in',
   'text=Asking to be let in',
+  'text=Asking to join',
   'text=Please wait until a meeting host brings you into the call',
   'text=Please wait until a meeting host',
+  "text=You can't join this call",
+  'text=Someone in the meeting needs to let you in',
   'text=En attente',
   'text=Demande en cours',
   'text=Veuillez patienter',
+  'text=Demande de participation',
 ];
 
 const MEETING_INDICATORS = [
@@ -122,11 +106,7 @@ const MEETING_INDICATORS = [
   '[data-requested-participant-id]',
 ];
 
-const MEETING_TEXT_INDICATORS = [
-  'text=Present now',
-  'text=Meeting details',
-  'text=Everyone will see',
-];
+const MEETING_TEXT_INDICATORS = ['text=Present now', 'text=Meeting details', 'text=Everyone will see'];
 
 const POST_MEETING_INDICATORS = [
   'text=You left the meeting',
@@ -170,9 +150,9 @@ const PRE_JOIN_OR_ERROR_SELECTOR = [
  * for maximum robustness against UI changes and transient failures.
  */
 export class GoogleMeetBot extends BaseMeetingBot {
-  private joinedSuccessfully = false;
-  private joinedAt: Date | null = null;
   private lastKnownParticipantCount = 0;
+  // meetingContentStartTime is inherited from BaseMeetingBot (protected)
+  private meetUIController: MeetUIController | null = null;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
     super({ ...config, platform: config.platform ?? 'GOOGLE_MEET' }, options);
@@ -227,10 +207,20 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private async attemptJoin(attempt: number): Promise<void> {
     if (!this.page) throw new Error('Page not initialized');
 
-    logger.info(`Joining Google Meet (attempt ${attempt}): ${this.config.meetingUrl}`);
+    // Clean the meeting URL: strip any authuser param and force anonymous guest mode
+    let meetUrl = this.config.meetingUrl;
+    try {
+      const urlObj = new URL(meetUrl);
+      urlObj.searchParams.delete('authuser');
+      meetUrl = urlObj.toString();
+    } catch {
+      // Keep original URL if parsing fails
+    }
+
+    logger.info(`Joining Google Meet (attempt ${attempt}): ${meetUrl}`);
 
     // Step 1: Navigate (domcontentloaded, not networkidle)
-    await this.page.goto(this.config.meetingUrl, {
+    await this.page.goto(meetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
@@ -242,7 +232,26 @@ export class GoogleMeetBot extends BaseMeetingBot {
       // Timeout is acceptable — we'll detect state next
     }
 
-    await this.sleep(1500 + Math.random() * 1500);
+    // Guard: if Google redirected to a ?authuser= URL, re-navigate without it.
+    // This happens when Google detects a cached auth context and serves a blank page.
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('authuser=') && !meetUrl.includes('authuser=')) {
+      logger.warn(`Google redirected to auth URL: ${currentUrl} — re-navigating without authuser`);
+      const cleanUrl = new URL(currentUrl);
+      cleanUrl.searchParams.delete('authuser');
+      await this.page.goto(cleanUrl.toString(), {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      try {
+        await this.page.waitForSelector(PRE_JOIN_OR_ERROR_SELECTOR, { timeout: 30000 });
+      } catch {
+        // continue
+      }
+      await this.sleep(200);
+    }
+
+    await this.sleep(200);
     await this.takeDebugScreenshot('01_page_loaded');
 
     // Step 2: Detect page state and route
@@ -264,8 +273,8 @@ export class GoogleMeetBot extends BaseMeetingBot {
         await this.startRecording();
         return;
       case 'UNKNOWN':
-        // Give it one more second, then re-check
-        await this.sleep(2000);
+        // Give it a moment, then re-check
+        await this.sleep(500);
         const recheck = await this.detectPageState();
         if (recheck === 'ACCESS_DENIED') throw new JoinError('Access denied', false);
         if (recheck === 'LOGIN_REQUIRED') throw new JoinError('Sign-in required', false);
@@ -282,18 +291,20 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     // Step 4: Turn off camera and microphone (with retry)
     await this.turnOffCamera();
-    await this.sleep(300 + Math.random() * 200);
+    await this.sleep(100);
     await this.turnOffMicrophone();
-    await this.sleep(300 + Math.random() * 200);
+    await this.sleep(100);
     await this.takeDebugScreenshot('02b_media_off');
+
+    // Step 5a: Dismiss any new popups that appeared after media toggle
+    // (e.g. "Do you want people to hear you in the meeting?" modal)
+    await this.handlePopups();
 
     // Step 5: Enter bot name (with retry)
     await this.enterName();
 
-    // Double-check media is off after name entry (Meet sometimes re-enables)
-    await this.sleep(500);
-    await this.turnOffCamera();
-    await this.turnOffMicrophone();
+    // Dismiss any popups triggered by name entry
+    await this.handlePopups();
     await this.takeDebugScreenshot('04_before_join');
 
     // Step 6: Click join button (with waitForSelector + retry)
@@ -313,6 +324,40 @@ export class GoogleMeetBot extends BaseMeetingBot {
       }
       throw new JoinError('Could not find join button', true);
     }
+
+    // After clicking join, wait for the page transition to settle before
+    // taking any screenshots.  Google Meet replaces the pre-join DOM entirely,
+    // which causes Playwright screenshots to be black during the transition.
+    await this.sleep(500);
+
+    // Diagnostic logging after join click — capture multiple signals to diagnose
+    // blank/black page issues (body empty, screenshots black).
+    try {
+      const diag = await this.page.evaluate(() => {
+        const bodyText = document.body?.innerText?.substring(0, 500) || '(empty body)';
+        const htmlLen = document.documentElement?.outerHTML?.length ?? 0;
+        const bodyChildCount = document.body?.children?.length ?? 0;
+        const readyState = document.readyState;
+        const iframeCount = document.querySelectorAll('iframe').length;
+        const shadowHosts = document.querySelectorAll('*');
+        let shadowRootCount = 0;
+        shadowHosts.forEach((el) => {
+          if ((el as any).shadowRoot) shadowRootCount++;
+        });
+        return { bodyText, htmlLen, bodyChildCount, readyState, iframeCount, shadowRootCount };
+      });
+      logger.info(`Page text after join click: ${diag.bodyText.replace(/\n/g, ' | ').substring(0, 300)}`);
+      logger.info(
+        `Page diagnostics: htmlLen=${diag.htmlLen}, bodyChildren=${diag.bodyChildCount}, readyState=${diag.readyState}, iframes=${diag.iframeCount}, shadowRoots=${diag.shadowRootCount}`,
+      );
+
+      // Log frame tree
+      const frames = this.page.frames();
+      logger.info(`Page frames: ${frames.length} total — ${frames.map((f) => f.url()).join(', ')}`);
+    } catch (evalError) {
+      logger.warn(`Failed to read page diagnostics after join click: ${evalError}`);
+    }
+    await this.takeDebugScreenshot('05b_post_join_transition');
 
     // Step 7: Wait for state transition (IN_MEETING or WAITING_ROOM)
     await this.waitForStateTransition();
@@ -341,11 +386,85 @@ export class GoogleMeetBot extends BaseMeetingBot {
     logger.info('Successfully joined Google Meet');
     await this.takeDebugScreenshot('07_joined_successfully');
 
-    // Wait for WebRTC to fully connect and remote tracks to arrive
-    // before starting recording — avoids capturing lobby/transition frames
+    // Prepare the UI BEFORE recording so the first frame is clean:
+    // fullscreen, camera/mic off, bot tile hidden, bottom bar hidden.
     await this.waitForWebRTCReady();
 
+    try {
+      await this.page!.keyboard.press('F11');
+    } catch {}
+
+    await this.turnOffCamera();
+    await this.turnOffMicrophone();
+
+    if (this.page) {
+      this.meetUIController = new MeetUIController(this.page);
+      const view = this.config.recordingConfig?.view ?? 'speaker';
+      await this.meetUIController.setView(view);
+    }
+
+    // Wait for the meeting UI to be fully rendered before starting recording.
+    await this.waitForMeetingUIReady();
+
+    // NOW start recording — the UI is clean, no trim needed for bot tile.
     await this.startRecording();
+    this.meetingContentStartTime = Date.now();
+    logger.info('Meeting content starts — UI ready, recording started');
+  }
+
+  /**
+   * Wait for the meeting UI to be fully rendered on screen.
+   *
+   * After admission, the DOM transitions from the waiting room to the meeting
+   * view. WebRTC may connect before this transition completes, so we wait for
+   * concrete meeting UI elements (participant tiles, leave button, etc.) to
+   * appear before starting the recording.
+   */
+  private async waitForMeetingUIReady(): Promise<void> {
+    if (!this.page) return;
+
+    // Build a selector that matches any of the key meeting UI elements.
+    // These are elements that only appear once the meeting view is fully loaded
+    // (not present in the waiting room).
+    const meetingUISelector = [
+      '[data-participant-id]', // participant video tiles
+      '[data-allocation-index]', // video tile allocation slots
+      '[data-self-name]', // self-view with name overlay
+      '[aria-label*="Leave call" i]', // leave call button
+    ].join(', ');
+
+    const deadline = Date.now() + 10_000; // 10s timeout
+    while (Date.now() < deadline) {
+      try {
+        const el = await this.page.$(meetingUISelector);
+        if (el) {
+          // Also verify that waiting room text is gone
+          const stillWaiting = await this.hasAnySelector([
+            'text=Please wait',
+            'text=Veuillez patienter',
+            'text=Asking to be let in',
+            'text=Waiting for someone',
+          ]);
+          if (stillWaiting) {
+            // Still transitioning from waiting room — keep polling
+            await this.sleep(250);
+            continue;
+          }
+          logger.info('Meeting UI is ready — participant tiles / controls visible');
+          // Brief settle for rendering to complete (video tile paint)
+          await this.sleep(500);
+          return;
+        }
+      } catch {
+        // page may be navigating
+      }
+      await this.sleep(250);
+    }
+
+    // If we timed out, add a fixed delay as a safety margin so the
+    // waiting-room-to-meeting transition has time to complete visually.
+    logger.warn('Meeting UI ready timeout — adding 1.5s safety delay before recording');
+    await this.sleep(1500);
   }
 
   // ========================================================================
@@ -360,7 +479,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Priority 1: Pre-join screen (name input or join button visible)
     // Check this FIRST because the pre-join page also contains "Sign in" link
     // in the top-right corner, which would false-positive as LOGIN_REQUIRED.
-    if (await this.hasAnySelector(NAME_INPUT_SELECTORS) || await this.hasAnySelector(JOIN_BUTTON_SELECTORS)) {
+    if ((await this.hasAnySelector(NAME_INPUT_SELECTORS)) || (await this.hasAnySelector(JOIN_BUTTON_SELECTORS))) {
       return 'PRE_JOIN';
     }
 
@@ -371,7 +490,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
     }
 
     // Priority 3: In meeting (only if NOT in waiting room or post-meeting)
-    if (await this.hasAnySelector(MEETING_INDICATORS) || await this.hasAnySelector(MEETING_TEXT_INDICATORS)) {
+    if ((await this.hasAnySelector(MEETING_INDICATORS)) || (await this.hasAnySelector(MEETING_TEXT_INDICATORS))) {
       if (!(await this.hasAnySelector(POST_MEETING_INDICATORS))) {
         return 'IN_MEETING';
       }
@@ -403,19 +522,6 @@ export class GoogleMeetBot extends BaseMeetingBot {
     return 'UNKNOWN';
   }
 
-  private async hasAnySelector(selectors: readonly string[]): Promise<boolean> {
-    if (!this.page) return false;
-    for (const selector of selectors) {
-      try {
-        const el = await this.page.$(selector);
-        if (el) return true;
-      } catch {
-        // continue
-      }
-    }
-    return false;
-  }
-
   // ========================================================================
   // POPUP HANDLING (adaptive loop)
   // ========================================================================
@@ -436,7 +542,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
           if (el) {
             await this.page.click(selector, { timeout: 2000 });
             logger.info(`Dismissed popup: ${selector}`);
-            await this.sleep(300 + Math.random() * 200);
+            await this.sleep(100);
             dismissed = true;
             lastDismissedAt = Date.now();
           }
@@ -452,7 +558,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
           if (el) {
             await this.page.keyboard.press('Escape');
             logger.info(`Escaped prompt: ${selector}`);
-            await this.sleep(500);
+            await this.sleep(200);
             dismissed = true;
             lastDismissedAt = Date.now();
           }
@@ -462,7 +568,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
       }
 
       if (!dismissed) {
-        await this.sleep(500);
+        await this.sleep(200);
       }
     }
   }
@@ -522,11 +628,17 @@ export class GoogleMeetBot extends BaseMeetingBot {
         try {
           const nameInput = await this.page.$(selector);
           if (nameInput) {
-            await nameInput.click();
-            await this.sleep(200 + Math.random() * 100);
+            // Try normal click first, fall back to force click if overlay blocks
+            try {
+              await nameInput.click({ timeout: 3000 });
+            } catch {
+              logger.info('Name input click blocked by overlay, using force click');
+              await nameInput.click({ force: true });
+            }
+            await this.sleep(50 + Math.random() * 50);
 
             await nameInput.fill('');
-            await this.sleep(100);
+            await this.sleep(50);
 
             // Type with human-like delays
             for (const char of this.config.botName) {
@@ -591,28 +703,74 @@ export class GoogleMeetBot extends BaseMeetingBot {
     if (!this.page) return;
 
     const deadline = Date.now() + 15000;
+    // Minimum wait after clicking join before trusting WebRTC signals.
+    // Google Meet creates RTCPeerConnections for pre-join camera preview,
+    // analytics, and STUN/TURN checks that can produce false positives.
+    const webrtcTrustAfter = Date.now() + 1500;
+    let iteration = 0;
 
     while (Date.now() < deadline) {
+      iteration++;
+
       // Primary: WebRTC connected = truly in meeting
-      const rtcState = await this.getWebRTCState();
-      if (rtcState.hasConnected && rtcState.remoteTrackCount > 0) {
-        logger.info(`In meeting via WebRTC (${rtcState.remoteTrackCount} remote tracks)`);
-        return;
+      // Only trust this signal after the minimum wait period AND if the page has content.
+      // Google creates RTCPeerConnections for analytics/STUN that give false positives.
+      if (Date.now() >= webrtcTrustAfter) {
+        const rtcState = await this.getWebRTCState();
+        const pageHasContent = await this.page
+          .evaluate(() => (document.body?.innerText?.trim().length || 0) > 10)
+          .catch(() => false);
+
+        if (rtcState.hasConnected && rtcState.remoteTrackCount > 0 && pageHasContent) {
+          // Cross-validate: require at least one meeting DOM indicator
+          const hasMeetingDom = await this.hasAnySelector([
+            '[aria-label*="Leave call" i]',
+            '[aria-label*="leave" i]',
+            '[data-meeting-title]',
+            '[data-participant-id]',
+          ]);
+          if (hasMeetingDom) {
+            logger.info(`In meeting via WebRTC (${rtcState.remoteTrackCount} remote tracks) + DOM confirmed`);
+            return;
+          }
+          logger.warn(
+            `WebRTC says connected (${rtcState.remoteTrackCount} tracks) but no meeting DOM found — ignoring false positive`,
+          );
+        }
       }
 
       // Secondary: DOM-based state
       const state = await this.detectPageState();
+
+      // Log diagnostic info every iteration
+      if (iteration <= 5 || iteration % 3 === 0) {
+        const rtcDiag =
+          Date.now() >= webrtcTrustAfter ? await this.getWebRTCState() : { hasConnected: false, remoteTrackCount: 0 };
+        const pageTitle = await this.page.title().catch(() => 'unknown');
+        const pageUrl = this.page.url();
+        const bodyText = await this.page
+          .evaluate(() => document.body?.innerText?.substring(0, 200) || '')
+          .catch(() => 'eval failed');
+        const rtcTrusted = Date.now() >= webrtcTrustAfter ? 'yes' : 'no';
+        logger.info(
+          `Post-join check #${iteration}: state=${state}, rtc={connected:${rtcDiag.hasConnected}, tracks:${rtcDiag.remoteTrackCount}, trusted:${rtcTrusted}}, url=${pageUrl}, title=${pageTitle}`,
+        );
+        logger.info(`Post-join body text: ${bodyText.replace(/\n/g, ' | ').substring(0, 150)}`);
+      }
+
       if (state === 'IN_MEETING' || state === 'WAITING_ROOM') {
+        logger.info(`State transition detected: ${state}`);
         return;
       }
       if (state === 'ACCESS_DENIED') {
         throw new JoinError('Access denied after clicking join', false);
       }
-      await this.sleep(1000);
+      await this.sleep(500);
     }
 
-    // Timeout is okay — we'll verify in the next steps
-    logger.info('State transition timeout — will verify in next step');
+    // Timeout — log final diagnostic
+    const finalState = await this.detectPageState();
+    logger.warn(`State transition timeout after ${iteration} checks — final state: ${finalState}`);
   }
 
   // ========================================================================
@@ -665,7 +823,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
         );
       }
 
-      await this.sleep(3000 + Math.random() * 2000);
+      await this.sleep(1000 + Math.random() * 1000);
     }
 
     throw new JoinError('Timed out waiting to be admitted', true);
@@ -700,7 +858,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
       return false;
     }
 
-    if (await this.hasAnySelector(MEETING_INDICATORS) || await this.hasAnySelector(MEETING_TEXT_INDICATORS)) {
+    if ((await this.hasAnySelector(MEETING_INDICATORS)) || (await this.hasAnySelector(MEETING_TEXT_INDICATORS))) {
       return true;
     }
 
@@ -718,6 +876,20 @@ export class GoogleMeetBot extends BaseMeetingBot {
 
     if (!this.joinedSuccessfully) {
       return false;
+    }
+
+    // Grace period: do not trust any end-of-meeting signals for the first 30s
+    // after joining. During this period, the DOM is still transitioning from
+    // the pre-join/waiting-room state to the meeting view, and transient text
+    // (e.g. "Rejoin", "You left the meeting") can appear briefly before being
+    // replaced by the actual meeting UI. This was the root cause of the bot
+    // leaving after only 16 seconds on the second join attempt.
+    const minTimeBeforeEndDetection = 30 * 1000;
+    if (this.joinedAt) {
+      const timeInMeeting = Date.now() - this.joinedAt.getTime();
+      if (timeInMeeting < minTimeBeforeEndDetection) {
+        return false;
+      }
     }
 
     // Primary signal: WebRTC all disconnected (most reliable)
@@ -750,18 +922,9 @@ export class GoogleMeetBot extends BaseMeetingBot {
     const aloneIndicators = [
       "text=You're the only one here",
       'text=Vous êtes le seul participant',
-      "text=No one else is here",
+      'text=No one else is here',
     ];
     const isAloneUI = await this.hasAnySelector(aloneIndicators);
-
-    // Participant count check (after 15s in meeting — reduced from 60s)
-    const minTimeInMeeting = 15 * 1000;
-    if (this.joinedAt) {
-      const timeInMeeting = Date.now() - this.joinedAt.getTime();
-      if (timeInMeeting < minTimeInMeeting) {
-        return false;
-      }
-    }
 
     const participantCount = await this.getParticipantCount();
 
@@ -773,7 +936,9 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Detect being alone: participant count <= 1 after having had other participants,
     // OR no live audio tracks after being connected, OR Google Meet "alone" UI
     if (participantCount <= 1 && this.lastKnownParticipantCount > 1) {
-      logger.info(`Meeting ended: bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`);
+      logger.info(
+        `Meeting ended: bot is the only participant left (count: ${participantCount}, peak: ${this.lastKnownParticipantCount})`,
+      );
       return true;
     }
 
@@ -782,15 +947,53 @@ export class GoogleMeetBot extends BaseMeetingBot {
       return true;
     }
 
-    if (rtcState.hasConnected && rtcState.liveAudioTracks === 0 && this.lastKnownParticipantCount > 1) {
-      logger.info(`Meeting ended: no live audio tracks remaining (peak participants: ${this.lastKnownParticipantCount})`);
+    if (rtcState.hasConnected && rtcState.remoteTrackCount === 0 && this.lastKnownParticipantCount > 1) {
+      logger.info(
+        `Meeting ended: no live audio tracks remaining (peak participants: ${this.lastKnownParticipantCount})`,
+      );
       return true;
+    }
+
+    // Fallback: check UserManager for participants with status != 1 (not in meeting)
+    // This handles the case where DOM-based participant count never saw other participants
+    // but the protobuf data channel knows they were there and left.
+    try {
+      const userManagerState = await this.page.evaluate(() => {
+        const um = (window as any).__aramisUserManager;
+        if (!um || !um.allUsersMap || um.allUsersMap.size === 0) return null;
+        let totalUsers = 0;
+        let activeUsers = 0;
+        for (const [deviceId, user] of um.allUsersMap) {
+          if (um.isCurrentUser(deviceId)) continue; // skip bot
+          totalUsers++;
+          if ((user as any).status === 1) activeUsers++; // status 1 = in meeting
+        }
+        return { totalUsers, activeUsers };
+      });
+
+      if (userManagerState && userManagerState.totalUsers > 0 && userManagerState.activeUsers === 0) {
+        logger.info(
+          `Meeting ended: UserManager shows all ${userManagerState.totalUsers} participants left (status != 1)`,
+        );
+        return true;
+      }
+
+      // Also update lastKnownParticipantCount from UserManager if DOM count failed
+      if (userManagerState && userManagerState.activeUsers > 0 && participantCount <= 1) {
+        const umCount = userManagerState.activeUsers + 1; // +1 for bot
+        if (umCount > this.lastKnownParticipantCount) {
+          this.lastKnownParticipantCount = umCount;
+          logger.info(`Participant count updated from UserManager: ${umCount}`);
+        }
+      }
+    } catch {
+      // UserManager not available — skip
     }
 
     return false;
   }
 
-  private async getParticipantCount(): Promise<number> {
+  protected async getParticipantCount(): Promise<number> {
     if (!this.page) return 0;
 
     try {
@@ -813,7 +1016,9 @@ export class GoogleMeetBot extends BaseMeetingBot {
         }
       }
 
-      const participantTiles = await this.page.$$('[data-participant-id], [data-requested-participant-id], [data-allocation-index]');
+      const participantTiles = await this.page.$$(
+        '[data-participant-id], [data-requested-participant-id], [data-allocation-index]',
+      );
       if (participantTiles.length > 0) {
         return participantTiles.length;
       }
@@ -832,7 +1037,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
    * and shows their name. This method reads the DOM to find who's speaking.
    * Works with any UI language since we read the visual indicator, not text.
    */
-  async detectActiveSpeaker(): Promise<ActiveSpeaker | null> {
+  async detectActiveSpeaker(): Promise<{ name: string; email?: string } | null> {
     if (!this.page) return null;
 
     try {
@@ -856,18 +1061,40 @@ export class GoogleMeetBot extends BaseMeetingBot {
           };
 
           if (isColored(outline) || isColored(border)) {
-            // Found speaking tile — extract the participant's name
-            // Try multiple selectors for the name label
-            const nameEl =
-              container.querySelector('[data-self-name]') ||
-              container.querySelector('[data-tooltip]') ||
-              container.querySelector('[class*="name" i]') ||
-              container.querySelector('span');
+            // Found speaking tile — extract the participant's name.
+            // Prefer data-tooltip attribute value (the display name)
+            // over textContent to avoid picking up CSS class fragments.
+            const tooltipEl = container.querySelector('[data-tooltip]');
+            const selfNameEl = container.querySelector('[data-self-name]');
+            let name = '';
 
-            const name = nameEl?.textContent?.trim();
+            if (tooltipEl) {
+              const tip = (tooltipEl as HTMLElement).getAttribute('data-tooltip')?.trim() || '';
+              if (tip && !/[_]/.test(tip) && !/^[a-z]+[A-Z]/.test(tip)) {
+                name = tip;
+              }
+            }
+            if (!name && selfNameEl) {
+              const selfName = (selfNameEl as HTMLElement).getAttribute('data-self-name')?.trim() || '';
+              if (selfName && !/[_]/.test(selfName)) {
+                name = selfName;
+              }
+            }
+            if (!name) {
+              // Fall back to leaf spans
+              const spans = container.querySelectorAll('span');
+              for (const span of spans) {
+                if (span.children.length > 0) continue;
+                const text = span.textContent?.trim() || '';
+                if (text && text.length >= 2 && !/[_]/.test(text) && !/^[a-z]+[A-Z]/.test(text)) {
+                  name = text;
+                  break;
+                }
+              }
+            }
+
             if (name && name !== 'You' && name !== 'Vous') {
-              // Try to extract email from tooltip or aria-label
-              const tooltip = (nameEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
+              const tooltip = (tooltipEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
               const email = tooltip.includes('@') ? tooltip : undefined;
               return { name, email };
             }
@@ -878,13 +1105,36 @@ export class GoogleMeetBot extends BaseMeetingBot {
         // When someone speaks, Google Meet may show their name in the main tile.
         const mainTile = document.querySelector('[data-allocation-index="0"]');
         if (mainTile) {
-          const nameEl =
-            mainTile.querySelector('[data-self-name]') ||
-            mainTile.querySelector('[data-tooltip]') ||
-            mainTile.querySelector('span');
-          const name = nameEl?.textContent?.trim();
+          let name = '';
+          const mainTooltipEl = mainTile.querySelector('[data-tooltip]');
+          if (mainTooltipEl) {
+            const tip = (mainTooltipEl as HTMLElement).getAttribute('data-tooltip')?.trim() || '';
+            if (tip && !/[_]/.test(tip) && !/^[a-z]+[A-Z]/.test(tip)) {
+              name = tip;
+            }
+          }
+          if (!name) {
+            const selfNameEl = mainTile.querySelector('[data-self-name]');
+            if (selfNameEl) {
+              const selfName = (selfNameEl as HTMLElement).getAttribute('data-self-name')?.trim() || '';
+              if (selfName && !/[_]/.test(selfName)) {
+                name = selfName;
+              }
+            }
+          }
+          if (!name) {
+            const spans = mainTile.querySelectorAll('span');
+            for (const span of spans) {
+              if (span.children.length > 0) continue;
+              const text = span.textContent?.trim() || '';
+              if (text && text.length >= 2 && !/[_]/.test(text) && !/^[a-z]+[A-Z]/.test(text)) {
+                name = text;
+                break;
+              }
+            }
+          }
           if (name && name !== 'You' && name !== 'Vous') {
-            const tooltip = (nameEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
+            const tooltip = (mainTooltipEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
             const email = tooltip.includes('@') ? tooltip : undefined;
             return { name, email };
           }
@@ -893,14 +1143,33 @@ export class GoogleMeetBot extends BaseMeetingBot {
         // Strategy 3: Check captions if enabled (most reliable for name).
         // Captions show "Speaker Name" above or next to the text.
         const captionContainers = document.querySelectorAll(
-          '[class*="caption" i], [class*="subtitle" i], [data-message-text]'
+          '[class*="caption" i], [class*="subtitle" i], [data-message-text]',
         );
         for (const cap of captionContainers) {
-          // Look for a speaker name element near the caption text
-          const speakerEl = cap.querySelector('[class*="name" i], [class*="sender" i]');
+          // Look for a speaker name element near the caption text.
+          // Use [class*="sender" i] but avoid [class*="name" i] which
+          // matches CSS classes like "frame_personReframe".
+          const speakerEl = cap.querySelector('[class*="sender" i]');
           if (speakerEl) {
             const name = speakerEl.textContent?.trim();
-            if (name) return { name };
+            if (name && !/[_]/.test(name) && !/^[a-z]+[A-Z]/.test(name)) {
+              return { name };
+            }
+          }
+          // Also check the first leaf span inside the caption container
+          // which often contains the speaker name
+          const spans = cap.querySelectorAll('span');
+          for (const span of spans) {
+            if (span.children.length > 0) continue;
+            const text = span.textContent?.trim() || '';
+            if (text && text.length >= 2 && text.length <= 60 && !/[_]/.test(text) && !/^[a-z]+[A-Z]/.test(text)) {
+              // Only return if it looks like a name (not caption text)
+              // Caption names are typically short and appear first
+              if (text !== 'You' && text !== 'Vous') {
+                return { name: text };
+              }
+            }
+            break; // Only check the first leaf span
           }
         }
 
@@ -918,9 +1187,36 @@ export class GoogleMeetBot extends BaseMeetingBot {
    * 1. Open the participant panel and read names from the list
    * 2. Fall back to reading participant tiles in the meeting view
    */
-  async extractParticipants(): Promise<ParticipantInfo[]> {
+  async extractParticipants(): Promise<{ name: string; email?: string; isHost?: boolean }[]> {
     if (!this.page) return [];
 
+    // Primary: use UserManager (protobuf data channel) — most reliable source
+    try {
+      const umParticipants = await this.page.evaluate(() => {
+        const um = (window as any).__aramisUserManager;
+        if (!um || !um.allUsersMap || um.allUsersMap.size === 0) return null;
+        const results: Array<{ name: string; email?: string; isHost?: boolean }> = [];
+        for (const [deviceId, user] of um.allUsersMap) {
+          if (um.isCurrentUser(deviceId)) continue;
+          const name = (user as any).fullName || (user as any).displayName;
+          if (!name) continue;
+          results.push({
+            name,
+            isHost: !!(user as any).isHost,
+          });
+        }
+        return results;
+      });
+
+      if (umParticipants && umParticipants.length > 0) {
+        logger.info(`Extracted ${umParticipants.length} participants from UserManager`);
+        return umParticipants;
+      }
+    } catch {
+      // UserManager not available, fall through to DOM scraping
+    }
+
+    // Fallback: DOM scraping
     try {
       // Try to open the participants panel by clicking the people button
       const peopleBtnSelectors = [
@@ -948,35 +1244,70 @@ export class GoogleMeetBot extends BaseMeetingBot {
         const results: Array<{ name: string; email?: string; isHost?: boolean }> = [];
         const seen = new Set<string>();
 
+        // Validate that a string looks like a real participant name
+        // and not a CSS class, icon identifier, or other DOM artifact.
+        // e.g. "frame_personReframe" contains underscores and camelCase
+        // which real names never have.
+        function isValidName(s: string): boolean {
+          if (!s || s.length < 2 || s.length > 100) return false;
+          if (/[_]/.test(s)) return false; // CSS class names
+          if (/^[a-z]+[A-Z]/.test(s)) return false; // camelCase identifiers
+          if (['You', 'Vous', 'Moi'].includes(s)) return false;
+          return true;
+        }
+
         // Strategy 1: Participant list panel items
-        // Google Meet renders participant names in a panel with role="list"
-        const listItems = document.querySelectorAll(
-          '[data-participant-id], [role="listitem"], [data-tooltip]'
-        );
+        // Google Meet renders participant names in a panel. Query
+        // participant entries but NOT the overly broad [data-tooltip]
+        // which matches many non-participant elements.
+        const listItems = document.querySelectorAll('[data-participant-id], [role="listitem"]');
 
         for (const item of listItems) {
-          // Try to get name from various attributes and child elements
-          const nameEl =
-            item.querySelector('[data-self-name]') ||
-            item.querySelector('[class*="name" i]') ||
-            item.querySelector('span');
-          let name = nameEl?.textContent?.trim() || '';
+          let name = '';
 
-          // Also try the element's own tooltip/aria-label
-          if (!name) {
-            name = (item as HTMLElement).getAttribute('data-tooltip')?.trim() || '';
-          }
-          if (!name) {
-            name = (item as HTMLElement).getAttribute('aria-label')?.trim() || '';
+          // Prefer data-tooltip on the item itself (contains display name)
+          const tooltip = (item as HTMLElement).getAttribute('data-tooltip')?.trim() || '';
+          if (tooltip && !tooltip.includes('\n') && isValidName(tooltip)) {
+            name = tooltip;
           }
 
-          if (!name || name === 'You' || name === 'Vous' || seen.has(name)) {
-            continue;
+          // Try [data-self-name] attribute value (used for the bot's own entry)
+          if (!name) {
+            const selfNameEl = item.querySelector('[data-self-name]');
+            if (selfNameEl) {
+              const selfName = selfNameEl.getAttribute('data-self-name')?.trim() || '';
+              if (isValidName(selfName)) {
+                name = selfName;
+              }
+            }
           }
+
+          // Try aria-label on the item
+          if (!name) {
+            const ariaLabel = (item as HTMLElement).getAttribute('aria-label')?.trim() || '';
+            if (isValidName(ariaLabel)) {
+              name = ariaLabel;
+            }
+          }
+
+          // Fall back to leaf <span> elements (no children) whose text
+          // looks like a real name, skipping spans with CSS class or
+          // icon text content.
+          if (!name) {
+            const spans = item.querySelectorAll('span');
+            for (const span of spans) {
+              if (span.children.length > 0) continue;
+              const text = span.textContent?.trim() || '';
+              if (isValidName(text) && !seen.has(text)) {
+                name = text;
+                break;
+              }
+            }
+          }
+
+          if (!name || seen.has(name)) continue;
           seen.add(name);
 
-          // Try to extract email from tooltip
-          const tooltip = (item as HTMLElement).getAttribute('data-tooltip') || '';
           const email = tooltip.includes('@') ? tooltip : undefined;
 
           // Check if host (Google Meet shows "Meeting host" or organizer badge)
@@ -994,20 +1325,46 @@ export class GoogleMeetBot extends BaseMeetingBot {
           const tiles = document.querySelectorAll('[data-participant-id]');
           for (const tile of tiles) {
             const container = tile.closest('[data-allocation-index]') || tile;
-            const nameEl =
-              container.querySelector('[data-self-name]') ||
-              container.querySelector('[data-tooltip]') ||
-              container.querySelector('[class*="name" i]') ||
-              container.querySelector('span');
+            let name = '';
 
-            const name = nameEl?.textContent?.trim();
-            if (!name || name === 'You' || name === 'Vous' || seen.has(name)) {
-              continue;
+            // Try data-tooltip first
+            const tooltipEl = container.querySelector('[data-tooltip]');
+            if (tooltipEl) {
+              const tip = (tooltipEl as HTMLElement).getAttribute('data-tooltip')?.trim() || '';
+              if (isValidName(tip)) {
+                name = tip;
+              }
             }
+
+            // Try data-self-name attribute value
+            if (!name) {
+              const selfNameEl = container.querySelector('[data-self-name]');
+              if (selfNameEl) {
+                const selfName = selfNameEl.getAttribute('data-self-name')?.trim() || '';
+                if (isValidName(selfName)) {
+                  name = selfName;
+                }
+              }
+            }
+
+            // Fall back to leaf spans
+            if (!name) {
+              const spans = container.querySelectorAll('span');
+              for (const span of spans) {
+                if (span.children.length > 0) continue;
+                const text = span.textContent?.trim() || '';
+                if (isValidName(text)) {
+                  name = text;
+                  break;
+                }
+              }
+            }
+
+            if (!name || seen.has(name)) continue;
             seen.add(name);
 
-            const tooltip = (nameEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
-            const email = tooltip.includes('@') ? tooltip : undefined;
+            const fullTooltip = (tooltipEl as HTMLElement)?.getAttribute?.('data-tooltip') || '';
+            const email = fullTooltip.includes('@') ? fullTooltip : undefined;
 
             results.push({ name, email, isHost: false });
           }

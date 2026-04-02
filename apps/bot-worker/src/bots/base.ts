@@ -103,6 +103,11 @@ export abstract class BaseMeetingBot {
   /** Timestamp (ms) when the meeting end was detected (last participant left) */
   protected meetingEndDetectedTime: number | null = null;
 
+  /** Set by subclasses once the bot has been admitted to the meeting */
+  protected joinedSuccessfully = false;
+  /** Set by subclasses when the bot joins the meeting */
+  protected joinedAt: Date | null = null;
+
   // Auto-leave tracking
   protected lastAudioActivity: number = Date.now();
 
@@ -170,8 +175,10 @@ export abstract class BaseMeetingBot {
         });
       }
     } else if (signal.type === 'HumanSpeechDetected') {
-      // Transcript received = humans are speaking in the meeting
-      if (this.peakParticipantCount < 2) {
+      // Transcript received = humans are speaking in the meeting.
+      // Only count after joinedSuccessfully to prevent lobby audio from
+      // arming the zombie watchdog prematurely.
+      if (this.peakParticipantCount < 2 && this.joinedSuccessfully) {
         this.peakParticipantCount = 2;
         logger.info('Human speech detected — peakParticipantCount set to 2');
       }
@@ -344,8 +351,12 @@ export abstract class BaseMeetingBot {
       const text = msg.text();
       if (text.startsWith('[ARAMIS]')) {
         logger.info(`[WebRTC] ${text}`);
-        // CSRC signals prove a human is speaking in the meeting
-        if (text.includes('New CSRC source:') && this.peakParticipantCount < 2) {
+        // CSRC signals prove a human is speaking in the meeting.
+        // Only count CSRC after the bot has actually joined — during lobby,
+        // WebRTC audio tracks may already be active but the bot isn't in the
+        // meeting yet. Setting peakParticipantCount=2 during lobby causes the
+        // zombie watchdog to false-trigger as soon as recording starts.
+        if (text.includes('New CSRC source:') && this.peakParticipantCount < 2 && this.joinedSuccessfully) {
           this.peakParticipantCount = 2;
           logger.info('CSRC detected — human in meeting (peak=2)');
         }

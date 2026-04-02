@@ -66,8 +66,6 @@ const TEAMS_CAMERA_PROMPT_SELECTORS = [
  * Uses the Teams web client for browser-based joining
  */
 export class TeamsBot extends BaseMeetingBot {
-  private joinedSuccessfully = false;
-  private joinedAt: Date | null = null;
   private lastKnownParticipantCount = 0;
 
 
