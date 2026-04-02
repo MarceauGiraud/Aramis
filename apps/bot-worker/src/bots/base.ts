@@ -217,9 +217,10 @@ export abstract class BaseMeetingBot {
         DISPLAY: display,
         // Force Chrome to output audio to this bot's dedicated PulseAudio sink,
         // avoiding the race condition where pactl set-default-sink is global.
-        PULSE_SINK: this.config.audioSource?.replace('.monitor', '') || 'virtual_speaker_99',
-        // Prevent Chrome from using any real microphone input (avoids feedback loop)
-        PULSE_SOURCE: 'virtual_silence',
+        PULSE_SINK: this.config.audioSource?.replace('.monitor', '') || `virtual_speaker_${display.replace(':', '')}`,
+        // Prevent Chrome from using any real microphone input (avoids feedback loop).
+        // The source name must match what DisplayAllocator creates: virtual_silence_<N>
+        PULSE_SOURCE: `virtual_silence_${display.replace(':', '')}`,
       },
       args: [
         '--incognito',

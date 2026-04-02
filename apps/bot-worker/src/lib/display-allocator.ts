@@ -316,10 +316,15 @@ export class DisplayAllocator {
         logger.warn(`PulseAudio monitor source ${monitorSource} not available after ${maxRetries} retries`);
       }
 
-      // NOTE: We no longer call `pactl set-default-sink` here because it is
-      // a global operation that causes a race condition when multiple bots run
-      // concurrently. Instead, each Chrome process uses the PULSE_SINK env var
-      // to route audio to its dedicated sink (set in base.ts at launch).
+      // Set as default sink so Chrome uses it. The PULSE_SINK env var is also
+      // set per-Chrome process (base.ts) as a belt-and-suspenders approach.
+      // For concurrent bots, the env var takes priority; the default is a
+      // fallback for clients that ignore PULSE_SINK.
+      try {
+        execSync(`pactl set-default-sink ${sinkName}`, { timeout: 5000 });
+      } catch {
+        logger.warn(`Failed to set ${sinkName} as default PulseAudio sink`);
+      }
 
       return moduleIndex;
     } catch (error) {
@@ -347,6 +352,14 @@ export class DisplayAllocator {
       }
 
       logger.debug(`PulseAudio silent source created: ${sourceName} (module ${moduleIndex})`);
+
+      // Set as default source so Chrome uses it for mic input
+      try {
+        execSync(`pactl set-default-source ${sourceName}`, { timeout: 5000 });
+      } catch {
+        logger.warn(`Failed to set ${sourceName} as default PulseAudio source`);
+      }
+
       return moduleIndex;
     } catch (error) {
       logger.warn(`Failed to create silent source ${sourceName}: ${error}`);
