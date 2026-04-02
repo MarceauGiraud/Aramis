@@ -276,82 +276,102 @@ export class TeamsBot extends BaseMeetingBot {
    * 2. DOM scraping via the roster panel
    * 3. Base class fallback (speaker history)
    */
+  /**
+   * Scrape participant names from the Teams roster panel and store them.
+   * Should be called DURING the meeting (while participants are present),
+   * not after they leave. Results are stored in rosterParticipants for
+   * later retrieval by extractParticipants().
+   */
+  private async scrapeRosterPanel(): Promise<void> {
+    if (!this.page) return;
+
+    const rosterBtnSelectors = [
+      '[data-tid="roster-button"]',
+      '[data-tid="people-button"]',
+      '[data-tid="calling-roster-button"]',
+      'button[id="roster-button"]',
+      '[aria-label*="participant" i]',
+      '[aria-label*="people" i]',
+      '[aria-label*="personne" i]',
+    ].join(', ');
+
+    try {
+      const panelOpened = await this.page.evaluate((sels) => {
+        const btn = document.querySelector(sels) as HTMLElement | null;
+        if (btn) { btn.click(); return true; }
+        return false;
+      }, rosterBtnSelectors).catch(() => false);
+
+      if (!panelOpened) return;
+      await this.sleep(1500);
+
+      const names = await this.page.evaluate(() => {
+        const results: string[] = [];
+        const selectors = [
+          '[data-tid="roster-participant"] [data-tid="roster-participant-name"]',
+          '[data-tid="roster-participant-name"]',
+          '[data-cid="roster-participant"] span[title]',
+          '.roster-list-item span[title]',
+          '[role="listitem"] [data-tid*="participant"] span',
+          '[data-tid="roster-section"] [role="listitem"] span[title]',
+          '[data-tid="roster-section"] [role="listitem"] [data-tid*="name"]',
+          // Broader v2 fallbacks
+          '[role="list"] [role="listitem"] span[title]',
+          '[role="list"] [role="listitem"] [data-tid*="name"] span',
+        ];
+        for (const sel of selectors) {
+          const elements = document.querySelectorAll(sel);
+          if (elements.length > 0) {
+            elements.forEach((el) => {
+              const name = (el as HTMLElement).title || (el as HTMLElement).textContent?.trim();
+              if (name && name.length > 1) results.push(name);
+            });
+            break;
+          }
+        }
+        return results;
+      });
+
+      // Close the roster panel
+      await this.page.evaluate((sels) => {
+        const btn = document.querySelector(sels) as HTMLElement | null;
+        if (btn) btn.click();
+      }, rosterBtnSelectors).catch(() => {});
+
+      // Store scraped names (deduplicated)
+      for (const name of names) {
+        this.rosterParticipants.set(name, name);
+      }
+      if (names.length > 0) {
+        logger.info(`Scraped ${names.length} participants from roster panel: ${names.join(', ')}`);
+      }
+    } catch (error) {
+      logger.warn(`Failed to scrape roster panel: ${error}`);
+    }
+  }
+
   async extractParticipants(): Promise<{ name: string; email?: string; isHost?: boolean }[]> {
-    // Strategy 1: use names collected from WebSocket roster frames
+    // Strategy 1: use names collected from WebSocket roster frames or scraped roster panel
     if (this.rosterParticipants.size > 0) {
-      const participants = Array.from(this.rosterParticipants.values()).map((name) => ({
-        name,
-        isHost: false,
-      }));
-      logger.info(`Extracted ${participants.length} participants from WebSocket roster data`);
+      const botName = this.config.botName || 'Kasar CRM';
+      const participants = Array.from(this.rosterParticipants.values())
+        .filter((name) => name !== botName && name.toLowerCase() !== botName.toLowerCase())
+        .map((name) => ({ name, isHost: false }));
+      logger.info(`Extracted ${participants.length} participants (filtered bot "${botName}")`);
       return participants;
     }
 
-    // Strategy 2: DOM scraping -- open the roster panel and read names
-    if (this.page) {
-      try {
-        const rosterBtnSelectors = [
-          '[data-tid="roster-button"]',
-          '[data-tid="people-button"]',
-          '[data-tid="calling-roster-button"]',
-          'button[id="roster-button"]',
-          '[aria-label*="participant" i]',
-          '[aria-label*="people" i]',
-          '[aria-label*="personne" i]',
-        ];
-
-        // Use page.evaluate() for the click to bypass the recording overlay
-        // (app-layout-area--main at z-index 1999 intercepts Playwright clicks)
-        let panelOpened = false;
-        const allSelectors = rosterBtnSelectors.join(', ');
-        panelOpened = await this.page.evaluate((sels) => {
-          const btn = document.querySelector(sels) as HTMLElement | null;
-          if (btn) { btn.click(); return true; }
-          return false;
-        }, allSelectors).catch(() => false);
-        if (panelOpened) await this.sleep(1500);
-
-        if (panelOpened) {
-          const names = await this.page.evaluate(() => {
-            const results: string[] = [];
-            // Teams roster panel uses list items with participant names
-            const selectors = [
-              '[data-tid="roster-participant"] [data-tid="roster-participant-name"]',
-              '[data-tid="roster-participant-name"]',
-              '[data-cid="roster-participant"] span[title]',
-              '.roster-list-item span[title]',
-              '[role="listitem"] [data-tid*="participant"] span',
-              // v2 selectors
-              '[data-tid="roster-section"] [role="listitem"] span[title]',
-              '[data-tid="roster-section"] [role="listitem"] [data-tid*="name"]',
-            ];
-            for (const sel of selectors) {
-              const elements = document.querySelectorAll(sel);
-              if (elements.length > 0) {
-                elements.forEach((el) => {
-                  const name = (el as HTMLElement).title || (el as HTMLElement).textContent?.trim();
-                  if (name) results.push(name);
-                });
-                break;
-              }
-            }
-            return results;
-          });
-
-          // Close the roster panel via JS click (bypasses overlay)
-          await this.page.evaluate((sels) => {
-            const btn = document.querySelector(sels) as HTMLElement | null;
-            if (btn) btn.click();
-          }, allSelectors).catch(() => {});
-
-          if (names.length > 0) {
-            const unique = Array.from(new Set(names));
-            logger.info(`Extracted ${unique.length} participants from Teams roster panel DOM`);
-            return unique.map((name) => ({ name, isHost: false }));
-          }
-        }
-      } catch (error) {
-        logger.warn(`Failed to extract participants from Teams DOM: ${error}`);
+    // Strategy 2: try scraping the roster panel now (may be empty if meeting ended)
+    await this.scrapeRosterPanel();
+    if (this.rosterParticipants.size > 0) {
+      // Re-run strategy 1 with newly scraped data
+      const botName = this.config.botName || 'Kasar CRM';
+      const participants = Array.from(this.rosterParticipants.values())
+        .filter((name) => name !== botName && name.toLowerCase() !== botName.toLowerCase())
+        .map((name) => ({ name, isHost: false }));
+      if (participants.length > 0) {
+        logger.info(`Extracted ${participants.length} participants from roster scrape (filtered bot)`);
+        return participants;
       }
     }
 
@@ -533,6 +553,11 @@ export class TeamsBot extends BaseMeetingBot {
     // removes the setup period (toolbars, layout switching, etc.).
     this.meetingContentStartTime = Date.now();
     logger.info('Meeting content starts — UI ready, recording already running');
+
+    // Scrape the roster panel NOW while participants are still present.
+    // This is crucial because extractParticipants() is called after the
+    // meeting ends, when only the bot remains in the roster.
+    await this.scrapeRosterPanel();
   }
 
   /**
