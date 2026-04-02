@@ -150,6 +150,15 @@ export class TeamsBot extends BaseMeetingBot {
 
           for (const { keyword, change } of endSignals) {
             if (payload.includes(keyword)) {
+              // Ignore participantRemoved before the bot has joined —
+              // this fires when OTHER participants leave/join while we
+              // are still in the lobby, causing a premature exit.
+              if (keyword === 'participantRemoved' && !this.joinedSuccessfully) {
+                logger.info(
+                  `Ignoring "${keyword}" WebSocket signal (bot not yet in meeting)`,
+                );
+                return;
+              }
               logger.info(
                 `WebSocket signal detected: "${keyword}" -> ${change} (ws: ${url.substring(0, 80)})`,
               );
@@ -1252,7 +1261,6 @@ export class TeamsBot extends BaseMeetingBot {
             'The meeting has ended',
             'Access denied',
             'Meetings are just one tool in our belt',
-            'Rejoin',
           ];
           for (const phrase of deniedPhrases) {
             if (bodyText.includes(phrase)) return 'denied';
@@ -1260,17 +1268,44 @@ export class TeamsBot extends BaseMeetingBot {
           if (document.querySelector('[data-tid="lobby-denied"], [data-tid="calling-retry-screen-title"]'))
             return 'denied';
 
+          // "Rejoin" button means we were kicked — but ONLY if there's an
+          // actual Rejoin button AND no hangup button (otherwise the word
+          // "Rejoin" may appear in other contexts while still in lobby).
+          const hasRejoinBtn = Array.from(
+            document.querySelectorAll('button, [role="button"]'),
+          ).some((el) => {
+            const txt = (el as HTMLElement).textContent?.trim().toLowerCase();
+            return txt === 'rejoin' || txt === 'rejoindre';
+          });
+          const hasHangup = !!document.querySelector(
+            '[data-inp="hangup-button"], #hangup-button, [data-tid="hangup-button"]',
+          );
+          if (hasRejoinBtn && !hasHangup) return 'denied';
+
           // Meeting detection (admitted)
           if (document.querySelector('[data-inp="hangup-button"], #hangup-button, [data-tid="hangup-button"]'))
             return 'meeting';
 
-          // Still in lobby
+          // Still in lobby — cover multiple wordings and locales
+          const lobbyPhrases = [
+            'will let you in',
+            'should let you in',
+            'waiting to be let in',
+            'let you in soon',
+            'En attente',
+            'va bientôt vous admettre',
+            'vous admettre dans la réunion',
+            'Warten auf Zulassung',
+            'Esperando a que alguien',
+            'Waiting for the organizer',
+          ];
+          for (const phrase of lobbyPhrases) {
+            if (bodyText.includes(phrase)) return 'lobby';
+          }
           if (
-            bodyText.includes('will let you in') ||
-            bodyText.includes('should let you in') ||
-            bodyText.includes('waiting to be let in') ||
-            bodyText.includes('En attente') ||
-            document.querySelector('[data-tid="lobby-screen"], .calling-lobby')
+            document.querySelector(
+              '[data-tid="lobby-screen"], .calling-lobby, [data-tid="prejoin-waiting-room"], [data-tid="lobby-waiting"]',
+            )
           ) {
             return 'lobby';
           }
@@ -1289,16 +1324,22 @@ export class TeamsBot extends BaseMeetingBot {
         return;
       }
 
-      // If we're no longer in lobby and not in meeting, something changed
+      // If we're no longer in lobby and not in meeting, something changed.
+      // This can happen when Teams DOM transitions between lobby → meeting
+      // and neither set of selectors matches momentarily.  Keep waiting
+      // instead of bailing out — the next iteration will re-evaluate.
       if (lobbyState === 'unknown') {
-        // Double-check with checkStillInMeeting
+        // Quick sanity check: if we're actually in the meeting already,
+        // accept it and return.
         const inMeeting = await this.checkStillInMeeting();
         if (inMeeting) {
           logger.info('Successfully admitted to meeting');
           return;
         }
-        // Not in lobby, not in meeting — maybe kicked or meeting ended
-        return;
+        // Otherwise stay in the loop — we may still be transitioning.
+        // Only bail if we've been in "unknown" for a long time (handled
+        // by the outer while timeout).
+        logger.info('Lobby state unknown, continuing to wait...');
       }
 
       logger.info('Waiting to be admitted from lobby...');
