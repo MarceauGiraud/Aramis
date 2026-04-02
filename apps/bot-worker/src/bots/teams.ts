@@ -166,6 +166,29 @@ export class TeamsBot extends BaseMeetingBot {
               return; // First match wins; avoid duplicate signals from the same frame
             }
           }
+
+          // Parse roster/participant updates from Teams signaling.
+          // Teams sends JSON frames with participant lists when people
+          // join or leave. We extract the count and feed it to the base
+          // class roster tracking so the zombie watchdog works.
+          try {
+            if (
+              payload.includes('participants') ||
+              payload.includes('roster') ||
+              payload.includes('endpointDetails')
+            ) {
+              const data = JSON.parse(payload);
+              const count = this.extractParticipantCountFromSignal(data);
+              if (count !== null) {
+                this.handleMeetingSignal({
+                  type: 'RosterUpdate',
+                  activeParticipantCount: count,
+                });
+              }
+            }
+          } catch {
+            // Not valid JSON or no participant data — ignore
+          }
         });
 
         ws.on('close', () => {
@@ -176,6 +199,46 @@ export class TeamsBot extends BaseMeetingBot {
       logger.info('WebSocket interception set up for Teams meeting-end detection');
     } catch (error) {
       logger.warn(`Failed to set up WebSocket interception: ${error}`);
+    }
+  }
+
+  /**
+   * Try to extract a participant count from a Teams WebSocket signaling frame.
+   * Teams uses various JSON structures; we look for arrays of participants
+   * or explicit count fields.
+   */
+  private extractParticipantCountFromSignal(data: any): number | null {
+    try {
+      // Structure 1: { participants: [...] } or { roster: [...] }
+      if (Array.isArray(data?.participants)) {
+        return data.participants.filter(
+          (p: any) => p.state === 'Connected' || p.state === 'InLobby' || !p.state,
+        ).length;
+      }
+      if (Array.isArray(data?.roster)) {
+        return data.roster.filter(
+          (p: any) => p.state === 'Connected' || !p.state,
+        ).length;
+      }
+
+      // Structure 2: { participantCount: N } or { activeParticipantCount: N }
+      if (typeof data?.participantCount === 'number') return data.participantCount;
+      if (typeof data?.activeParticipantCount === 'number') return data.activeParticipantCount;
+
+      // Structure 3: Nested under body/content
+      const body = data?.body || data?.content || data?.resource;
+      if (body && typeof body === 'object') {
+        return this.extractParticipantCountFromSignal(body);
+      }
+
+      // Structure 4: { endpointDetails: [...] } — each entry is a connected endpoint
+      if (Array.isArray(data?.endpointDetails)) {
+        return data.endpointDetails.length;
+      }
+
+      return null;
+    } catch {
+      return null;
     }
   }
 
@@ -1376,8 +1439,8 @@ export class TeamsBot extends BaseMeetingBot {
   }
 
   protected async getParticipantCount(): Promise<number> {
-    // Use persisted roster count if available (more reliable than DOM, and not
-    // overwritten by DominantSpeaker / Caption signals like meetingSignal is)
+    // Use persisted roster count if available (most reliable — comes from
+    // Teams WebSocket signaling, not fragile DOM queries)
     if (this.lastRosterParticipantCount !== null) {
       return this.lastRosterParticipantCount;
     }
@@ -1393,6 +1456,10 @@ export class TeamsBot extends BaseMeetingBot {
           '[aria-label*="people" i]',
           '[data-tid="people-button"]',
           'button[id="roster-button"]',
+          // Teams v2 additional selectors
+          '[data-tid="calling-roster-button"]',
+          '[aria-label*="personne" i]',
+          '[aria-label*="teilnehmer" i]',
         ];
         for (const sel of rosterSelectors) {
           const btn = document.querySelector(sel);
@@ -1407,24 +1474,68 @@ export class TeamsBot extends BaseMeetingBot {
           }
         }
 
-        // Method 2: Count participant video streams (data-stream-type="Video")
+        // Method 2: Count participant video streams
         const streams = document.querySelectorAll(
           '[data-stream-type="Video"], [data-cid="calling-participant-stream"], [data-test-segment-type="central"] video',
         );
         if (streams.length > 0) return streams.length;
 
-        // Method 3: Check if hangup button exists (means we're in a meeting)
-        // but no roster count found — assume at least 1
-        const hangup = document.querySelector('[data-inp="hangup-button"], #hangup-button');
+        // Method 3: Check WebRTC connections for active remote audio tracks.
+        // Even when video is off, audio tracks indicate other participants.
+        try {
+          const entries = (window as any).__aramisPeerConnections as
+            | Array<{ pc: RTCPeerConnection; createdAt: number }>
+            | undefined;
+          if (entries && entries.length > 0) {
+            let remoteAudioTracks = 0;
+            for (const entry of entries) {
+              const pc = entry.pc;
+              if (pc.connectionState === 'closed') continue;
+              for (const receiver of pc.getReceivers()) {
+                if (receiver.track?.kind === 'audio' && !receiver.track.muted) {
+                  remoteAudioTracks++;
+                }
+              }
+            }
+            if (remoteAudioTracks > 0) return remoteAudioTracks;
+            // All PCs exist but 0 remote audio tracks → we're alone
+            if (entries.some((e) => e.pc.connectionState === 'connected')) {
+              return 1;
+            }
+          }
+        } catch {
+          // WebRTC check failed — continue to fallback
+        }
+
+        // Method 4: Check "You're the only one here" or similar alone indicators
+        const bodyText = document.body?.textContent || '';
+        const alonePhrases = [
+          "You're the only one here",
+          'only one in the meeting',
+          'Vous êtes le seul',
+          'seul dans la réunion',
+          'Waiting for others to join',
+          'En attente des autres',
+        ];
+        for (const phrase of alonePhrases) {
+          if (bodyText.includes(phrase)) return 1;
+        }
+
+        // Method 5: Check if hangup button exists (means we're in a meeting)
+        const hangup = document.querySelector(
+          '[data-inp="hangup-button"], #hangup-button, [data-tid="hangup-button"]',
+        );
         if (!hangup) return 0; // Not in meeting at all
 
-        return 1;
+        // Hangup exists but couldn't determine count — return -1 to signal
+        // "unknown" so the zombie watchdog doesn't false-trigger
+        return -1;
       });
 
       return count;
     } catch (error) {
       logger.warn(`Failed to get participant count: ${error}`);
-      return 1;
+      return -1;
     }
   }
 
