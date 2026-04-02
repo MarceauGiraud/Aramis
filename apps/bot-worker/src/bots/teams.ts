@@ -982,6 +982,22 @@ export class TeamsBot extends BaseMeetingBot {
           }
           if (document.querySelector('[data-tid="lobby-screen"], .calling-lobby')) return 'lobby';
 
+          // Kicked/ended detection — Teams shows this when the bot was
+          // immediately removed or the call ended during join
+          const kickedPhrases = [
+            'You have left the call',
+            'You left the meeting',
+            'The meeting has ended',
+            'Call ended',
+            'You were removed',
+            'denied access',
+            'La réunion est terminée',
+            'Vous avez quitté',
+          ];
+          for (const phrase of kickedPhrases) {
+            if (bodyText.includes(phrase)) return 'kicked';
+          }
+
           // Meeting detection — hangup button means we're in
           if (
             document.querySelector(
@@ -1002,6 +1018,9 @@ export class TeamsBot extends BaseMeetingBot {
       if (state === 'meeting') {
         logger.info('Directly admitted to meeting (no lobby)');
         return 'meeting';
+      }
+      if (state === 'kicked') {
+        throw new JoinError('Bot was immediately removed from the call ("You have left the call")', true);
       }
 
       // Fail fast on error states (e.g. connection failure after clicking Join)

@@ -30,10 +30,17 @@ RUN pnpm install --frozen-lockfile
 # Copy source code
 COPY . .
 
-# Install Google Chrome for Teams video codec support (H.264/AAC).
-# The container always runs as linux/amd64 (QEMU on Apple Silicon),
-# so Chrome for Testing is always available.
-RUN pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome
+# Install Google Chrome for H.264/AAC codec support (Teams video).
+# On ARM64 (Apple Silicon), Chrome for Testing is not available, so we
+# install chromium-codecs-ffmpeg-extra to add H.264 to the bundled Chromium.
+# On x86_64, we install Chrome for Testing which includes all codecs.
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      pnpm --filter @aramis/bot-worker exec playwright install --with-deps chrome; \
+    else \
+      apt-get update && \
+      apt-get install -y --no-install-recommends chromium-codecs-ffmpeg-extra || true && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Generate Prisma client and build all packages in a single layer
 RUN pnpm --filter @aramis/database generate \

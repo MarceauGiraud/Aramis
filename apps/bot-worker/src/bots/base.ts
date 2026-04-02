@@ -208,9 +208,10 @@ export abstract class BaseMeetingBot {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.browser = await (chromium as any).launch({
       headless: this.options.headless,
-      // Use Google Chrome instead of Chromium for proprietary H.264/AAC codec
-      // support. The container always runs as linux/amd64 (QEMU on ARM64).
-      channel: 'chrome' as const,
+      // Use Google Chrome on x86_64 for H.264/AAC codec support.
+      // On ARM64, Chrome for Testing is not available; we use the bundled
+      // Chromium with chromium-codecs-ffmpeg-extra installed in Docker.
+      ...(process.arch === 'x64' ? { channel: 'chrome' as const } : {}),
       env: {
         ...process.env,
         DISPLAY: display,
