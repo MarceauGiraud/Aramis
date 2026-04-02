@@ -389,8 +389,12 @@ export class GoogleMeetBot extends BaseMeetingBot {
     logger.info('Successfully joined Google Meet');
     await this.takeDebugScreenshot('07_joined_successfully');
 
-    // Prepare the UI BEFORE recording so the first frame is clean:
-    // fullscreen, camera/mic off, bot tile hidden, bottom bar hidden.
+    // Start recording immediately — FFmpeg x11grab captures the screen
+    // regardless of what's on it, so it's safe to start early and trim later.
+    // This avoids losing meeting content while the UI setup runs (~10s).
+    await this.startRecording();
+
+    // Now prepare the UI. The trim will remove this setup period.
     await this.waitForWebRTCReady();
 
     try {
@@ -406,13 +410,12 @@ export class GoogleMeetBot extends BaseMeetingBot {
       await this.meetUIController.setView(view);
     }
 
-    // Wait for the meeting UI to be fully rendered before starting recording.
     await this.waitForMeetingUIReady();
 
-    // NOW start recording — the UI is clean, no trim needed for bot tile.
-    await this.startRecording();
+    // Mark content start AFTER UI is ready — the trim correctly removes
+    // the setup period (camera/mic toggle, view switch, etc.).
     this.meetingContentStartTime = Date.now();
-    logger.info('Meeting content starts — UI ready, recording started');
+    logger.info('Meeting content starts — UI ready, recording already running');
   }
 
   /**
