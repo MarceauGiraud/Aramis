@@ -13,7 +13,7 @@ import { NativeSpeakerDetector, SpeakerEvent } from '../lib/native-speaker-detec
 import { PerParticipantAudioManager } from '../lib/per-participant-audio/manager';
 import { PER_PARTICIPANT_AUDIO_SCRIPT } from '../lib/per-participant-audio/browser-inject';
 import { uploadRecording } from '../lib/storage';
-import { prisma } from '@aramis/database';
+// Prisma removed — bot communicates via Kasar webhook
 
 // Add stealth plugin to avoid bot detection
 // Disable specific evasions that can cause issues
@@ -139,7 +139,7 @@ export abstract class BaseMeetingBot {
     // Normalize platform to uppercase (Kasar sends lowercase, Aramis expects uppercase)
     this.config = {
       ...config,
-      platform: config.platform.toUpperCase().replace(/-/g, '_') as BotConfig['platform'],
+      platform: (config.platform || '').toUpperCase().replace(/-/g, '_') as BotConfig['platform'],
     };
     this.options = {
       headless: options.headless ?? process.env.BOT_HEADLESS !== 'false',
@@ -1394,28 +1394,7 @@ export abstract class BaseMeetingBot {
         logger.warn('Could not upload screenshot to S3');
       }
 
-      // Store in BotLog if bot session exists
-      try {
-        const session = await prisma.botSession.findUnique({
-          where: { meetingId: this.config.meetingId },
-        });
-        if (session) {
-          await prisma.botLog.create({
-            data: {
-              botSessionId: session.id,
-              level: 'INFO',
-              message: `Screenshot captured: ${reason}`,
-              metadata: {
-                screenshotUrl: s3Url || localPath,
-                reason,
-                timestamp: new Date().toISOString(),
-              },
-            },
-          });
-        }
-      } catch {
-        // Best effort logging
-      }
+      logger.info(`Screenshot stored: ${s3Url || localPath} (reason: ${reason})`);
 
       return s3Url || localPath;
     } catch (error) {
@@ -1447,28 +1426,7 @@ export abstract class BaseMeetingBot {
         logger.warn('Could not upload page content to S3');
       }
 
-      // Store in BotLog
-      try {
-        const session = await prisma.botSession.findUnique({
-          where: { meetingId: this.config.meetingId },
-        });
-        if (session) {
-          await prisma.botLog.create({
-            data: {
-              botSessionId: session.id,
-              level: 'INFO',
-              message: `Page content captured: ${reason}`,
-              metadata: {
-                contentUrl: s3Url || localPath,
-                reason,
-                timestamp: new Date().toISOString(),
-              },
-            },
-          });
-        }
-      } catch {
-        // Best effort logging
-      }
+      logger.info(`Page content stored: ${s3Url || localPath} (reason: ${reason})`);
 
       return s3Url || localPath;
     } catch (error) {
