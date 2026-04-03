@@ -526,6 +526,24 @@ export class RecordingOrchestrator extends EventEmitter {
         logger.info('Starting S3 upload of final recordings');
         await this.uploadFinalRecordings();
         logger.info('S3 upload complete');
+
+        // Delete the raw video.webm from S3 (it contains waiting room + untrimmed content)
+        // Only the trimmed merged.webm should remain
+        if (this.s3VideoUrl && this.s3MergedUrl && this.s3VideoUrl !== this.s3MergedUrl) {
+          try {
+            const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+            const rawKey = this.s3VideoUrl.replace(/^s3:\/\/[^/]+\//, '');
+            await this.s3Client.send(
+              new DeleteObjectCommand({
+                Bucket: this.config.s3Bucket,
+                Key: rawKey,
+              }),
+            );
+            logger.info(`Deleted raw video from S3: ${rawKey}`);
+          } catch (err) {
+            logger.warn(`Failed to delete raw video from S3 (non-fatal): ${err}`);
+          }
+        }
       } else {
         logger.info(`S3 upload skipped (upload=${upload}, s3Configured=${!!this.s3Client})`);
       }
