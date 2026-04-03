@@ -553,7 +553,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     // Send everything to Kasar via notifyRecordingComplete
     await kasarClient.notifyRecordingComplete(meetingId, {
       storagePath: videoUrl || '',
-      duration: Math.floor((Date.now() - jobStartTime) / 1000),
+      duration: recordingInfo?.duration ?? Math.floor((Date.now() - jobStartTime) / 1000),
       fileSize: 0,
       transcript: transcriptPayload,
       participants: participantsData.length > 0 ? participantsData : undefined,
