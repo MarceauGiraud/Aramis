@@ -266,7 +266,7 @@ export abstract class BaseMeetingBot {
         // Window size matches Xvfb (1280x830). The extra 110px height accommodates
         // Chrome's toolbar plus a safety margin. FFmpeg crops the measured chrome
         // height for clean output.
-        '--window-size=1280,830',
+        `--window-size=${resolution.width},${resolution.height + 110}`,
         '--window-position=0,0',
         '--disable-infobars',
         // Disable CSP to allow our binary WebSocket (ws://localhost:8765)

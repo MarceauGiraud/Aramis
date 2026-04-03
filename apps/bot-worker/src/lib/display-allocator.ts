@@ -45,7 +45,7 @@ export class DisplayAllocator {
   // Xvfb is 110px taller than the target video to accommodate Chrome's toolbar
   // plus a small safety margin. FFmpeg crops the top N pixels (measured dynamically)
   // for a clean video without browser chrome or black bands.
-  constructor(baseDisplay: number = 99, resolution = { width: 1280, height: 830 }) {
+  constructor(baseDisplay: number = 99, resolution = { width: 1920, height: 1190 }) {
     this.baseDisplay = baseDisplay;
     this.resolution = resolution;
   }
