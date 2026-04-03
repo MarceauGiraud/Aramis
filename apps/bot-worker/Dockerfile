@@ -63,8 +63,8 @@ EOF
 # Create entrypoint script: start PulseAudio, then Node
 # Xvfb displays and PulseAudio sinks are managed per-bot by DisplayAllocator
 RUN echo '#!/bin/bash\n\
-# Start PulseAudio daemon (sinks created dynamically per bot)\n\
-pulseaudio --start --exit-idle-time=-1\n\
+# Start PulseAudio in system mode (required when running as root in Docker)\n\
+pulseaudio --system --daemonize --exit-idle-time=-1 --disallow-exit --disallow-module-loading=false\n\
 sleep 1\n\
 \n\
 # Run the bot worker\n\
