@@ -646,7 +646,7 @@ export abstract class BaseMeetingBot {
       audioSource: this.config.audioSource || process.env.PULSE_SOURCE || 'default',
       tempDir: recordingsDir,
       resolution: { width: resolution.width, height: resolution.height },
-      frameRate: 24,
+      frameRate: 30,
       enableLiveUpload: true,
       format: recordingConfig?.format ?? 'mp4',
       resolutionPreset: recordingConfig?.resolution ?? '720p',
