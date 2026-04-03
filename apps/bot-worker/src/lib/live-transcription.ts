@@ -11,7 +11,6 @@
 
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
-import { prisma } from '@aramis/database';
 import { logger } from './logger';
 import {
   TranscriptionProvider,
@@ -287,104 +286,30 @@ export class LiveTranscriptionManager extends EventEmitter {
   }
 
   /**
-   * Flush all final transcript segments to the database.
-   * Creates a Transcript record with all segments, speakers, and words.
-   */
-  async flushToDatabase(): Promise<string | null> {
-    if (this.finalSegments.length === 0) {
-      logger.info('No transcript segments to flush');
-      return null;
-    }
-
-    logger.info(`Flushing ${this.finalSegments.length} segments to database`);
-
-    try {
-      const providerName = this.config.providerName || 'deepgram';
-
-      // Collect unique speakers
-      const speakerLabels = new Set<string>();
-      for (const seg of this.finalSegments) {
-        if (seg.speaker) speakerLabels.add(seg.speaker);
-      }
-
-      // Build full text
-      const fullText = this.finalSegments.map((s) => s.text).join(' ');
-
-      // Create transcript
-      const transcript = await prisma.transcript.create({
-        data: {
-          meetingId: this.config.meetingId,
-          status: 'COMPLETED',
-          provider: providerName,
-          fullText,
-          wordCount: fullText.split(/\s+/).length,
-          language: this.config.language,
-          processedAt: new Date(),
-        },
-      });
-
-      // Create speakers
-      const speakerMap = new Map<string, string>();
-      for (const label of speakerLabels) {
-        const speaker = await prisma.transcriptSpeaker.create({
-          data: {
-            transcriptId: transcript.id,
-            label,
-            segmentCount: this.finalSegments.filter((s) => s.speaker === label).length,
-            totalDuration: this.finalSegments
-              .filter((s) => s.speaker === label)
-              .reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
-          },
-        });
-        speakerMap.set(label, speaker.id);
-      }
-
-      // Create segments
-      for (let i = 0; i < this.finalSegments.length; i++) {
-        const seg = this.finalSegments[i];
-        const speakerId = seg.speaker ? speakerMap.get(seg.speaker) : undefined;
-
-        const segment = await prisma.transcriptSegment.create({
-          data: {
-            transcriptId: transcript.id,
-            speakerId: speakerId || undefined,
-            text: seg.text,
-            startTime: seg.startTime,
-            endTime: seg.endTime,
-            confidence: seg.confidence,
-            order: i,
-          },
-        });
-
-        // Create words if available
-        if (seg.words && seg.words.length > 0) {
-          await prisma.transcriptWord.createMany({
-            data: seg.words.map((word, wordIndex) => ({
-              segmentId: segment.id,
-              text: word.text,
-              startTime: word.startTime,
-              endTime: word.endTime,
-              confidence: word.confidence,
-              order: wordIndex,
-            })),
-          });
-        }
-      }
-
-      logger.info(`Transcript flushed to database: ${transcript.id}`);
-      return transcript.id;
-    } catch (error) {
-      logger.error(`Failed to flush transcript to database: ${error}`);
-      this.emit('error', error instanceof Error ? error : new Error(String(error)));
-      return null;
-    }
-  }
-
-  /**
    * Get all final segments collected so far.
    */
   getFinalSegments(): TranscriptSegment[] {
     return [...this.finalSegments];
+  }
+
+  /**
+   * Get unique speakers with aggregated stats derived from final segments.
+   */
+  getSpeakers(): Array<{ id: string; label: string; totalDuration: number; segmentCount: number }> {
+    const speakerMap = new Map<string, { totalDuration: number; segmentCount: number }>();
+    for (const seg of this.finalSegments) {
+      const label = seg.speaker || 'Unknown';
+      const existing = speakerMap.get(label) || { totalDuration: 0, segmentCount: 0 };
+      existing.totalDuration += seg.endTime - seg.startTime;
+      existing.segmentCount++;
+      speakerMap.set(label, existing);
+    }
+    return Array.from(speakerMap.entries()).map(([label, stats]) => ({
+      id: label,
+      label,
+      totalDuration: stats.totalDuration,
+      segmentCount: stats.segmentCount,
+    }));
   }
 
   /**

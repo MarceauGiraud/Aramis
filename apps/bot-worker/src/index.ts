@@ -10,13 +10,9 @@ import { QUEUE_NAMES } from '@aramis/shared';
 import { logger } from './lib/logger';
 import { isS3Configured } from './lib/s3-config';
 import { AudioWebSocketServer } from './lib/websocket-server';
-import { WebhookDispatcher } from './lib/webhook-dispatcher';
 import { displayAllocator } from './lib/display-allocator';
 import * as promMetrics from './lib/prometheus-metrics';
 import { createTranscriptionWorker } from './transcription-worker';
-import { createWebhookDeliveryWorker } from './webhook-delivery-worker';
-import { createCalendarSyncWorker, setupCalendarSyncRepeatable } from './calendar-sync-worker';
-import { createSummaryWorker } from './summary-worker';
 import { createHttpServer } from './http-server';
 import { processMeetingJob } from './job-handler';
 
@@ -40,7 +36,6 @@ const transcriptionQueue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: re
 const workerId = `worker-${process.pid}-${Date.now()}`;
 const httpServer = createHttpServer(workerId);
 const wsServer = new AudioWebSocketServer();
-const webhookDispatcher = new WebhookDispatcher(redis);
 
 // --- Startup log ---
 
@@ -54,7 +49,7 @@ logger.info(`Starting bot worker: ${workerId}`);
 
 // --- Workers ---
 
-const jobHandlerDeps = { redis, redisSub, transcriptionQueue, wsServer, webhookDispatcher, workerId };
+const jobHandlerDeps = { redis, redisSub, transcriptionQueue, wsServer, workerId };
 
 const meetingWorker = new Worker(QUEUE_NAMES.MEETING_BOT, (job) => processMeetingJob(job, jobHandlerDeps), {
   connection: redis,
@@ -73,12 +68,6 @@ meetingWorker.on('failed', (job, err) => {
 const transcriptionWorker = createTranscriptionWorker(redis, BULLMQ_PREFIX);
 logger.info('Transcription worker started and listening for jobs');
 
-const summaryWorker = createSummaryWorker(redis, BULLMQ_PREFIX);
-logger.info('Summary worker started and listening for jobs');
-
-const webhookDeliveryWorker = createWebhookDeliveryWorker(redis, BULLMQ_PREFIX);
-const calendarSyncWorker = createCalendarSyncWorker(redis, BULLMQ_PREFIX);
-
 // --- Initialize services ---
 
 async function initialize() {
@@ -95,13 +84,6 @@ async function initialize() {
   httpServer.listen(port, () => {
     logger.info(`HTTP/WebSocket server listening on port ${port}`);
   });
-
-  // Set up calendar sync repeatable job
-  try {
-    await setupCalendarSyncRepeatable(redis, BULLMQ_PREFIX);
-  } catch (error) {
-    logger.warn(`Failed to set up calendar sync: ${error}`);
-  }
 
   // Poll queue depths every 30 seconds for Prometheus
   setInterval(async () => {
@@ -129,12 +111,8 @@ async function shutdown() {
 
   await meetingWorker.close();
   await transcriptionWorker.close();
-  await summaryWorker.close();
-  await webhookDeliveryWorker.close();
-  await calendarSyncWorker.close();
 
   await transcriptionQueue.close();
-  await webhookDispatcher.close();
   await wsServer.close();
   httpServer.close();
 

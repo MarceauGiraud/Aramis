@@ -1,14 +1,13 @@
 import { Job, Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { prisma } from '@aramis/database';
 import { BOT_CONFIG, BOT_COMMANDS_CHANNEL } from '@aramis/shared';
 import type { BotCommand, RecordingConfig } from '@aramis/shared';
 import { MeetingBotFactory } from './bots/factory';
 import { BaseMeetingBot } from './bots/base';
 import { logger } from './lib/logger';
 import { AudioWebSocketServer } from './lib/websocket-server';
-import { WebhookDispatcher } from './lib/webhook-dispatcher';
-import { stateMachine, classifyError } from './lib/bot-state-machine';
+import { kasarClient } from './lib/kasar-client';
+import { classifyError } from './lib/bot-state-machine';
 import { displayAllocator } from './lib/display-allocator';
 import { LiveTranscriptionManager } from './lib/live-transcription';
 import { PerParticipantAudioManager } from './lib/per-participant-audio/manager';
@@ -23,47 +22,32 @@ export interface JobHandlerDeps {
   redisSub: IORedis;
   transcriptionQueue: Queue;
   wsServer: AudioWebSocketServer;
-  webhookDispatcher: WebhookDispatcher;
   workerId: string;
 }
 
 /**
- * Check deduplication key to prevent duplicate bots.
+ * Check deduplication key via Redis to prevent duplicate bots.
  */
-async function checkDeduplication(deduplicationKey: string | undefined, meetingId: string): Promise<boolean> {
-  if (!deduplicationKey) return false;
-
+async function checkDeduplication(redis: IORedis, meetingId: string): Promise<boolean> {
   try {
-    const existing = await prisma.botSession.findFirst({
-      where: {
-        meetingId,
-        status: { in: ['RUNNING', 'STARTING'] },
-      },
-    });
-
+    const existing = await redis.get(`bot:active:${meetingId}`);
     if (existing) {
-      logger.info(`Deduplication: bot already running for meeting ${meetingId} (session: ${existing.id})`);
+      logger.info(`Deduplication: bot already active for meeting ${meetingId}`);
       return true;
     }
   } catch (error) {
     logger.warn(`Deduplication check failed: ${error}`);
   }
-
   return false;
 }
 
 /**
- * Start heartbeat interval for a bot session.
+ * Start heartbeat interval for a bot session via Redis.
  */
-function startHeartbeat(meetingId: string): ReturnType<typeof setInterval> {
+function startHeartbeat(redis: IORedis, meetingId: string): ReturnType<typeof setInterval> {
   return setInterval(async () => {
     try {
-      await prisma.botSession.update({
-        where: { meetingId },
-        data: {
-          lastPing: new Date(),
-        },
-      });
+      await redis.set(`bot:heartbeat:${meetingId}`, String(Date.now()), 'EX', 120);
     } catch (error) {
       logger.debug(`Heartbeat update failed for ${meetingId}: ${error}`);
     }
@@ -79,10 +63,12 @@ function setupCommandChannel(redisSub: IORedis, meetingId: string, bot: BaseMeet
 
   const messageHandler = (_channel: string, message: string): void => {
     try {
-      const command: BotCommand = JSON.parse(message);
-      logger.info(`Received command for ${meetingId}: ${command.action}`);
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      const command = parsed as unknown as BotCommand;
+      const action = (parsed.type as string) || command.action;
+      logger.info(`Received command for ${meetingId}: ${action}`);
 
-      switch (command.action) {
+      switch (action) {
         case 'pause':
           bot.pauseRecording();
           break;
@@ -93,11 +79,10 @@ function setupCommandChannel(redisSub: IORedis, meetingId: string, bot: BaseMeet
           bot.leave().catch((err) => logger.error(`Leave command failed: ${err}`));
           break;
         case 'send_chat':
-          // Chat sending is platform-specific; log for now
           logger.info(`Send-chat command received: ${JSON.stringify(command.data)}`);
           break;
         default:
-          logger.warn(`Unknown command type: ${(command as any).type}`);
+          logger.warn(`Unknown command: ${String(action)}`);
       }
     } catch (error) {
       logger.error(`Failed to process command: ${error}`);
@@ -123,10 +108,10 @@ function setupCommandChannel(redisSub: IORedis, meetingId: string, bot: BaseMeet
  * Process a single meeting-bot job. This is the callback passed to the
  * BullMQ Worker for the MEETING_BOT queue.
  */
-export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise<any> {
-  const { redis, redisSub, transcriptionQueue, wsServer, webhookDispatcher, workerId } = deps;
+export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise<unknown> {
+  const { redis, redisSub, transcriptionQueue, wsServer, workerId } = deps;
 
-  const { meetingId, meetingUrl, platform, botName, recordingConfig, deduplicationKey, metadata } = job.data;
+  const { meetingId, meetingUrl, platform, botName, recordingConfig, metadata } = job.data;
 
   // Validate required fields
   if (!meetingId || !meetingUrl || !platform) {
@@ -141,47 +126,25 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
   const jobStartTime = Date.now();
 
   // Deduplication check
-  if (await checkDeduplication(deduplicationKey, meetingId)) {
+  if (await checkDeduplication(redis, meetingId)) {
     logger.info(`Skipping duplicate bot for meeting ${meetingId}`);
     return { success: false, reason: 'duplicate' };
   }
 
-  // Verify meeting exists before processing
-  const meeting = await prisma.meeting.findUnique({
-    where: { id: meetingId },
-    select: { id: true, status: true },
-  });
-
-  if (!meeting) {
+  // Verify meeting exists in Kasar
+  const meetingCheck = await kasarClient.checkMeetingStatus(meetingId);
+  if (!meetingCheck.exists) {
     throw new Error(`Meeting not found: ${meetingId}`);
   }
 
   // Check if meeting should be aborted before joining
-  // This guards against retries re-joining completed/failed/active meetings
-  const abortCheck = await stateMachine.checkAbortBeforeJoin(meetingId);
-  if (abortCheck.abort) {
-    logger.info(`Meeting ${meetingId} skipped before join: ${abortCheck.reason}`);
-    return { success: false, reason: abortCheck.reason };
+  if (['ready', 'failed'].includes(meetingCheck.status) || meetingCheck.hasRecording) {
+    logger.info(`Meeting ${meetingId} skipped before join: status=${meetingCheck.status}`);
+    return { success: false, reason: `meeting_${meetingCheck.status}` };
   }
 
-  // State transition: JOINING
-  await stateMachine.transition(meetingId, 'JOINING', {
-    reason: 'Worker picked up job',
-  });
-
-  // Initialize bot session
-  await stateMachine.initBotSession(meetingId, workerId);
-
-  // Register webhooks for this meeting
-  await webhookDispatcher.registerWebhooks(meetingId);
-
-  // Dispatch bot joining event
-  await webhookDispatcher.dispatch({
-    type: 'bot_joining',
-    meetingId,
-    timestamp: new Date(),
-    data: { platform, meetingUrl },
-  });
+  // Initialize bot session in Redis
+  await redis.set(`bot:active:${meetingId}`, workerId, 'EX', 14400); // 4h TTL
 
   // Create the appropriate bot for the platform
   // Allocate a unique display + PulseAudio sink for this bot
@@ -198,7 +161,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
   });
 
   // Start heartbeat
-  const heartbeatInterval = startHeartbeat(meetingId);
+  const heartbeatInterval = startHeartbeat(redis, meetingId);
 
   // Set up command channel
   const cleanupCommandChannel = setupCommandChannel(redisSub, meetingId, bot);
@@ -210,40 +173,21 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     // Initialize and join
     await bot.initialize();
 
-    // Update bot session to RUNNING
-    await stateMachine.transitionSession(meetingId, 'RUNNING', 'Bot initialized');
-
     await bot.join();
 
-    // Dispatch bot joined event
-    await webhookDispatcher.dispatch({
-      type: 'bot_joined',
-      meetingId,
-      timestamp: new Date(),
-    });
+    // Notify Kasar that bot has joined
+    await kasarClient.notifyBotJoined(meetingId);
 
-    // State transition: RECORDING
+    // Track join duration
     const joinedAt = new Date();
     promMetrics.joinDuration.observe((joinedAt.getTime() - jobStartTime) / 1000);
-
-    await stateMachine.transition(meetingId, 'RECORDING', {
-      meetingData: { actualStart: joinedAt },
-      reason: 'Bot joined meeting',
-    });
-
-    // Dispatch recording started event
-    await webhookDispatcher.dispatch({
-      type: 'recording_started',
-      meetingId,
-      timestamp: new Date(),
-    });
 
     // Register audio stream for WebSocket if available
     const orchestrator = bot.getRecordingOrchestrator();
 
     // Listen for recording segment rotation events from the orchestrator
     if (orchestrator) {
-      orchestrator.on('recording-rotated', (segmentInfo: any) => {
+      orchestrator.on('recording-rotated', (segmentInfo: unknown) => {
         logger.info(`Recording segment rotated for ${meetingId}`, {
           segment: segmentInfo,
         });
@@ -257,7 +201,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
 
         // Wire WebSocket meeting signals (e.g., Teams CDN) to the bot
         wsServer.onMeetingSignal((signalMeetingId, signal) => {
-          if (bot && signalMeetingId === meeting.id) {
+          if (bot && signalMeetingId === meetingId) {
             bot.handleMeetingSignal(signal);
           }
         });
@@ -297,7 +241,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
             language: job.data.transcriptionConfig?.language,
           });
 
-          liveTranscription.on('transcript', (segment: any, isFinal: boolean) => {
+          liveTranscription.on('transcript', (segment: { text: string; speaker?: string; startTime: number; endTime: number; confidence?: number }, isFinal: boolean) => {
             // Receiving a transcript proves humans are speaking in the meeting
             bot.handleMeetingSignal({ type: 'HumanSpeechDetected' });
 
@@ -308,19 +252,13 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
             });
 
             if (isFinal) {
-              webhookDispatcher.dispatch({
-                type: 'transcript_segment',
-                meetingId,
-                timestamp: new Date(),
-                data: {
-                  text: segment.text,
-                  speaker: segment.speaker,
-                  startTime: segment.startTime,
-                  endTime: segment.endTime,
-                  confidence: segment.confidence,
-                  isFinal: true,
-                },
-              });
+              kasarClient.sendTranscriptChunk(meetingId, [{
+                start: segment.startTime,
+                end: segment.endTime,
+                speaker: segment.speaker || 'Unknown',
+                text: segment.text,
+                confidence: segment.confidence,
+              }]).catch(err => logger.warn(`Transcript chunk send failed: ${err}`));
             }
             // Forward to WebSocket clients
             wsServer.broadcastTranscript(meetingId, segment, isFinal);
@@ -338,13 +276,18 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
 
           // Wire per-participant audio transcription if available (overrides mixed audio diarization)
           if (perParticipantManager) {
-            perParticipantManager.on('transcript', (segment: any, isFinal: boolean) => {
+            perParticipantManager.on('transcript', (segment: { text?: string; speaker?: string; startTime?: number; endTime?: number; confidence?: number }, isFinal: boolean) => {
               if (isFinal && segment.text) {
                 logger.info(`[Per-participant] ${segment.speaker}: ${segment.text}`);
               }
               // Broadcast via WebSocket
               if (wsServer) {
-                wsServer.broadcastTranscript(meetingId, segment, isFinal);
+                wsServer.broadcastTranscript(meetingId, {
+                  text: segment.text || '',
+                  speaker: segment.speaker,
+                  startTime: segment.startTime || 0,
+                  endTime: segment.endTime || 0,
+                }, isFinal);
               }
             });
             logger.info('Per-participant audio transcription wired for meeting ' + meetingId);
@@ -382,26 +325,60 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
       }
     }
 
-    // Stop live transcription and flush to database
-    let liveTranscriptFlushed = false;
+    // Stop live transcription and collect segments in memory
+    let liveTranscriptData: { fullText: string; segments: Array<{ start: number; end: number; speaker: string; text: string; confidence?: number }>; speakers: Array<{ id: string; label: string; identifiedName?: string; totalDuration: number }> } | null = null;
     if (liveTranscription) {
       try {
         await liveTranscription.stop();
-        await liveTranscription.flushToDatabase();
-        liveTranscriptFlushed = true;
-        logger.info(`Live transcript flushed to database for meeting ${meetingId}`);
+        const segments = liveTranscription.getFinalSegments();
+        if (segments.length > 0) {
+          // Run speaker reconciliation before building the payload
+          const speakerHistory = bot.getSpeakerHistory();
+          if (speakerHistory.length > 0) {
+            const reconciler = new SpeakerReconciler();
+            const mapping = reconciler.reconcile(
+              segments.map(s => ({ speaker: s.speaker, startTime: s.startTime, endTime: s.endTime })),
+              speakerHistory
+            );
+            // Apply reconciled names to segments
+            for (const seg of segments) {
+              if (seg.speaker) {
+                const name = mapping.labelToName.get(seg.speaker);
+                if (name) seg.speaker = name;
+              }
+            }
+          }
+
+          // Collect unique speakers
+          const speakerLabels = [...new Set(segments.map(s => s.speaker).filter(Boolean))] as string[];
+          const fullText = segments.map(s => s.text).join(' ');
+          liveTranscriptData = {
+            fullText,
+            segments: segments.map(s => ({
+              start: s.startTime,
+              end: s.endTime,
+              speaker: s.speaker || 'Unknown',
+              text: s.text,
+              confidence: s.confidence,
+            })),
+            speakers: speakerLabels.map(label => ({
+              id: label,
+              label,
+              identifiedName: label,
+              totalDuration: segments
+                .filter(s => s.speaker === label)
+                .reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
+            })),
+          };
+          logger.info(`Live transcript collected for meeting ${meetingId}: ${segments.length} segments`);
+        }
       } catch (err) {
-        logger.warn(`Failed to flush live transcript: ${err}`);
+        logger.warn(`Failed to collect live transcript: ${err}`);
       }
     }
 
     // Unregister WebSocket audio stream
     wsServer.unregisterBot(meetingId);
-
-    // State transition: PROCESSING
-    await stateMachine.transition(meetingId, 'PROCESSING', {
-      reason: 'Meeting ended, processing recording',
-    });
 
     // Process recording (orchestrator handles S3 upload internally)
     let recordingPath: string | null = null;
@@ -427,9 +404,8 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
           // No local recording either -- mark as failed but do NOT throw
           // (throwing would trigger BullMQ retry which re-joins the meeting)
           logger.error(`No recording available for ${meetingId} after save failure`);
-          await stateMachine.transition(meetingId, 'FAILED', {
-            errorMessage: `Recording save failed: ${saveMsg}`,
-            reason: 'Recording save/upload failed, no local fallback',
+          await kasarClient.notifyError(meetingId, `Recording save failed: ${saveMsg}`, 'save_recording').catch(err => {
+            logger.error(`Failed to notify Kasar of error: ${err}`);
           });
           return { success: false, reason: 'recording_save_failed', error: saveMsg };
         }
@@ -438,78 +414,39 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
       }
     }
 
-    // Save chat messages to DB
+    // Collect chat messages
     const chatMessages = bot.getChatMessages();
-    if (chatMessages.length > 0) {
-      logger.info(`Saving ${chatMessages.length} chat messages for meeting ${meetingId}`);
-      try {
-        for (const msg of chatMessages) {
-          await (prisma as any).chatMessage.create({
-            data: {
-              meetingId,
-              sender: msg.sender,
-              message: msg.message,
-              timestamp: msg.timestamp,
-              platform: msg.platform,
-            },
-          });
-        }
-      } catch (chatError) {
-        // ChatMessage model may not exist in schema yet
-        logger.warn(`Failed to save chat messages (model may not exist): ${chatError}`);
-      }
+    const chatData = chatMessages.map(msg => ({
+      sender: msg.sender,
+      message: msg.message,
+      timestamp: msg.timestamp?.toISOString?.() || new Date().toISOString(),
+      platform: msg.platform || platform,
+    }));
+
+    if (chatData.length > 0) {
+      logger.info(`Collected ${chatData.length} chat messages for meeting ${meetingId}`);
     }
 
-    // Store detected participants in the database
+    // Collect participants
+    let participantsData: Array<{ name: string; email?: string; isHost?: boolean }> = [];
     try {
       const extractedParticipants = await bot.extractParticipants();
       if (extractedParticipants.length > 0) {
-        logger.info(`Storing ${extractedParticipants.length} participants for meeting ${meetingId}`);
-        for (const p of extractedParticipants) {
-          await prisma.participant.create({
-            data: {
-              meetingId,
-              name: p.name,
-              email: p.email ?? null,
-              isHost: p.isHost ?? false,
-            },
-          });
-        }
-        logger.info(`Stored ${extractedParticipants.length} participants for meeting ${meetingId}`);
+        participantsData = extractedParticipants.map(p => ({
+          name: p.name,
+          email: p.email ?? undefined,
+          isHost: p.isHost ?? false,
+        }));
       } else {
-        // Fall back to speaker history if extractParticipants returned nothing
-        const speakerNames = [...new Set(bot.getSpeakerHistory().map((s) => s.speaker))];
-        if (speakerNames.length > 0) {
-          logger.info(`Storing ${speakerNames.length} participants from speaker history for meeting ${meetingId}`);
-          for (const name of speakerNames) {
-            await prisma.participant.create({
-              data: {
-                meetingId,
-                name,
-                isHost: false,
-              },
-            });
-          }
-        }
+        const speakerNames = [...new Set(bot.getSpeakerHistory().map(s => s.speaker))];
+        participantsData = speakerNames.map(name => ({ name, isHost: false }));
       }
-    } catch (participantError) {
-      logger.warn(`Failed to store participants (non-fatal): ${participantError}`);
+    } catch (err) {
+      logger.warn(`Failed to extract participants: ${err}`);
     }
 
     if (noRecording) {
-      // No recording mode: just update meeting status
-      await stateMachine.transition(meetingId, 'COMPLETED', {
-        meetingData: { actualEnd: new Date() },
-        reason: 'No recording mode',
-      });
-
-      // Dispatch bot left event
-      await webhookDispatcher.dispatch({
-        type: 'bot_left',
-        meetingId,
-        timestamp: new Date(),
-      });
-
+      await kasarClient.notifyBotLeft(meetingId, 'no_recording_mode');
       return { success: true, noRecording: true, chatMessages: chatMessages.length };
     }
 
@@ -518,188 +455,81 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
 
     const s3Uploaded = !!(recordingInfo?.s3MergedUrl || recordingInfo?.s3VideoUrl);
 
-    // Update meeting with actualEnd (already in PROCESSING)
-    await prisma.meeting.update({
-      where: { id: meetingId },
-      data: { actualEnd: new Date() },
-    });
-
-    // Create recording record with both video and audio URLs
-    const recording = await prisma.recording.create({
-      data: {
-        meetingId,
-        videoUrl,
-        audioUrl: recordingInfo?.s3AudioUrl ?? undefined,
-        status: s3Uploaded ? 'COMPLETED' : 'PROCESSING',
-      },
-    });
-
-    logger.info(`Meeting ${meetingId} recording saved: ${videoUrl}`);
-    if (recordingInfo?.s3AudioUrl) {
-      logger.info(`Audio available at: ${recordingInfo.s3AudioUrl}`);
-    }
-
-    // Dispatch recording stopped event
-    await webhookDispatcher.dispatch({
-      type: 'recording_stopped',
-      meetingId,
-      timestamp: new Date(),
-      data: { videoUrl, s3Uploaded },
-    });
-
     // Collect DOM-detected speaker history for transcription reconciliation
     const speakerHistory = bot.getSpeakerHistory();
     if (speakerHistory.length > 0) {
       logger.info(`Collected ${speakerHistory.length} DOM speaker events for meeting ${meetingId}`);
     }
 
-    // Reconcile speaker names: either on the live transcript or via post-hoc job
-    if (liveTranscriptFlushed && speakerHistory.length > 0) {
-      // Live transcript already in DB -- reconcile speaker names directly
-      try {
-        const transcript = await prisma.transcript.findFirst({
-          where: { meetingId },
-          include: {
-            speakers: true,
-            segments: { include: { speaker: true } },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (transcript && transcript.segments.length > 0) {
-          // Map Prisma segments to reconciler input (needs speaker label, not speakerId)
-          const segmentsForReconciler = transcript.segments.map((seg) => ({
-            speaker: seg.speaker?.label,
-            startTime: seg.startTime,
-            endTime: seg.endTime,
-          }));
-
-          const reconciler = new SpeakerReconciler();
-          const mapping = reconciler.reconcile(segmentsForReconciler, speakerHistory);
-
-          if (mapping.labelToName.size > 0) {
-            for (const speaker of transcript.speakers) {
-              const identifiedName = mapping.labelToName.get(speaker.label);
-              if (identifiedName) {
-                await prisma.transcriptSpeaker.update({
-                  where: { id: speaker.id },
-                  data: { identifiedName },
-                });
-              }
-            }
-            logger.info(
-              `Speaker reconciliation applied to live transcript: ` + `${mapping.labelToName.size} names identified`,
-            );
-          }
-        }
-      } catch (reconcileError) {
-        logger.warn(`Speaker reconciliation on live transcript failed (non-fatal): ${reconcileError}`);
-      }
-    }
-
-    // Queue batch transcription only when per-participant didn't produce
-    // enough segments. Per-participant segments already have real speaker
-    // names; batch transcription would replace them with generic "Speaker N".
-    const audioUrl = recordingInfo?.s3AudioUrl;
+    // If per-participant segments available, use them as transcript data
     if (perParticipantSegments && perParticipantSegments.length > 0) {
-      logger.info(`Per-participant produced ${perParticipantSegments.length} segments — saving as final transcript`);
+      logger.info(`Per-participant produced ${perParticipantSegments.length} segments — using as final transcript`);
 
-      // Save per-participant segments directly to the database since we skip
-      // batch transcription (per-participant already has real speaker names).
-      try {
-        const fullText = perParticipantSegments.map((s) => s.text).join(' ');
-        const avgConfidence =
-          perParticipantSegments.reduce((sum, s) => sum + ((s as any).confidence || 0), 0) /
-          perParticipantSegments.length;
-
-        const transcript = await prisma.transcript.create({
-          data: {
-            meetingId,
-            status: 'COMPLETED',
-            provider: 'deepgram',
-            fullText,
-            language: 'fr',
-            confidence: avgConfidence,
-            wordCount: fullText.split(/\s+/).length,
-          },
-        });
-
-        // Create speakers
-        const speakerNames = [...new Set(perParticipantSegments.map((s) => s.speaker).filter(Boolean))] as string[];
-        const speakerMap = new Map<string, string>();
-
-        for (const name of speakerNames) {
-          const speaker = await prisma.transcriptSpeaker.create({
-            data: {
-              transcriptId: transcript.id,
-              label: name,
-              identifiedName: name,
+      const fullText = perParticipantSegments.map(s => s.text).join(' ');
+      const speakerNames = [...new Set(perParticipantSegments.map(s => s.speaker).filter(Boolean))] as string[];
+      liveTranscriptData = {
+        fullText,
+        segments: perParticipantSegments.map(s => ({
+          start: s.startTime,
+          end: s.endTime,
+          speaker: s.speaker || 'Unknown',
+          text: s.text,
+          confidence: undefined,
+        })),
+        speakers: speakerNames.map(name => ({
+          id: name,
+          label: name,
+          identifiedName: name,
+          totalDuration: 0,
+        })),
+      };
+    } else {
+      // Queue batch transcription if we have audio and no live transcript
+      const audioUrl = recordingInfo?.s3AudioUrl;
+      if (!liveTranscriptData && audioUrl && s3Uploaded && process.env.DEEPGRAM_API_KEY) {
+        try {
+          await transcriptionQueue.add(
+            'transcribe',
+            {
+              meetingId,
+              audioUrl,
+              model: 'nova-3',
+              language: 'detect',
+              speakerHistory: speakerHistory.length > 0 ? speakerHistory : undefined,
             },
-          });
-          speakerMap.set(name, speaker.id);
-        }
-
-        // Create segments
-        for (let i = 0; i < perParticipantSegments.length; i++) {
-          const seg = perParticipantSegments[i];
-          await prisma.transcriptSegment.create({
-            data: {
-              transcriptId: transcript.id,
-              speakerId: seg.speaker ? speakerMap.get(seg.speaker) : undefined,
-              text: seg.text,
-              startTime: seg.startTime,
-              endTime: seg.endTime,
-              confidence: (seg as any).confidence,
-              order: i,
+            {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 10000 },
             },
-          });
+          );
+          logger.info(`Queued batch transcription (Nova-3, auto-detect language) for ${meetingId}`);
+        } catch (queueError) {
+          logger.error(`Failed to queue transcription: ${queueError}`);
         }
-
-        logger.info(`Saved ${perParticipantSegments.length} per-participant segments to database`);
-      } catch (saveError) {
-        logger.error(`Failed to save per-participant segments to database: ${saveError}`);
-      }
-    } else if (!audioUrl) {
-      logger.warn(`No audio available for ${meetingId} — skipping batch transcription`);
-    } else if (s3Uploaded && process.env.DEEPGRAM_API_KEY) {
-      try {
-        // Live transcript is kept until the batch job succeeds.
-        // The transcription worker will atomically replace it in a transaction.
-
-        await transcriptionQueue.add(
-          'transcribe',
-          {
-            meetingId,
-            recordingId: recording.id,
-            audioUrl,
-            model: 'nova-3',
-            language: 'detect',
-            speakerHistory: speakerHistory.length > 0 ? speakerHistory : undefined,
-          },
-          {
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-          },
-        );
-        logger.info(`Queued batch transcription (Nova-3, auto-detect language) for ${meetingId}`);
-      } catch (queueError) {
-        logger.error(`Failed to queue transcription: ${queueError}`);
+      } else if (!liveTranscriptData && !audioUrl) {
+        logger.warn(`No audio available for ${meetingId} — skipping batch transcription`);
       }
     }
 
     // Track meeting duration
     promMetrics.meetingDuration.observe((Date.now() - jobStartTime) / 1000);
 
-    // State transition: COMPLETED
-    await stateMachine.transition(meetingId, 'COMPLETED', {
-      reason: 'Recording saved and transcription queued',
-    });
+    // Build transcript payload
+    const transcriptPayload = liveTranscriptData ? {
+      fullText: liveTranscriptData.fullText,
+      segments: liveTranscriptData.segments,
+      speakers: liveTranscriptData.speakers,
+      provider: job.data.transcriptionConfig?.provider || 'deepgram',
+    } : undefined;
 
-    // Dispatch bot left event
-    await webhookDispatcher.dispatch({
-      type: 'bot_left',
-      meetingId,
-      timestamp: new Date(),
+    // Send everything to Kasar via notifyRecordingComplete
+    await kasarClient.notifyRecordingComplete(meetingId, {
+      storagePath: videoUrl || '',
+      duration: Math.floor((Date.now() - jobStartTime) / 1000),
+      fileSize: 0,
+      transcript: transcriptPayload,
+      participants: participantsData.length > 0 ? participantsData : undefined,
+      chatMessages: chatData.length > 0 ? chatData : undefined,
     });
 
     return { success: true, recordingPath: videoUrl, s3Uploaded };
@@ -707,12 +537,9 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error(`Error in meeting bot for ${meetingId}: ${errorMessage}`);
 
-    // Dispatch error event
-    await webhookDispatcher.dispatch({
-      type: 'error',
-      meetingId,
-      timestamp: new Date(),
-      data: { error: errorMessage },
+    // Notify Kasar of error
+    await kasarClient.notifyError(meetingId, errorMessage, 'meeting_bot').catch(err => {
+      logger.error(`Failed to notify Kasar of error: ${err}`);
     });
 
     // Stop live transcription on error
@@ -743,14 +570,8 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     // Track error metric
     promMetrics.errorsTotal.inc({ error_type: classifyError(error), phase: 'meeting_bot' });
 
-    // Transition meeting to FAILED with error classification
-    try {
-      await stateMachine.failWithError(meetingId, error);
-    } catch (updateError) {
-      logger.error(`Failed to update meeting/session status: ${updateError}`);
-    }
-
-    throw error;
+    // Do not re-throw — let the job complete to prevent BullMQ retry re-joining the meeting
+    return { success: false, reason: 'error', error: errorMessage };
   } finally {
     // Track session end
     promMetrics.activeSessions.dec();
@@ -761,15 +582,9 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     // Clean up command channel
     cleanupCommandChannel();
 
-    // Unregister webhooks for this meeting
-    webhookDispatcher.unregisterWebhooks(meetingId);
-
-    // Update bot session to STOPPED
-    try {
-      await stateMachine.transitionSession(meetingId, 'STOPPED', 'Job finished');
-    } catch {
-      // Ignore - session may not exist or already in terminal state
-    }
+    // Clean up Redis session keys
+    await redis.del(`bot:active:${meetingId}`).catch(() => {});
+    await redis.del(`bot:heartbeat:${meetingId}`).catch(() => {});
 
     try {
       await bot.cleanup();
