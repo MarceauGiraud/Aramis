@@ -45,7 +45,7 @@ function createMockPage(opts: MockPageOptions = {}) {
   let currentUrl = url;
   let currentBodyText = bodyText;
   let currentSelectors = { ...selectors };
-  let evaluateOverride: ((fn: Function) => any) | null = null;
+  let evaluateOverride: ((fn: (...args: unknown[]) => unknown) => unknown) | null = null;
 
   const page: any = {
     url: () => currentUrl,
@@ -71,7 +71,7 @@ function createMockPage(opts: MockPageOptions = {}) {
       return Promise.resolve([]);
     }),
 
-    evaluate: vi.fn().mockImplementation((fn: Function) => {
+    evaluate: vi.fn().mockImplementation((fn: (...args: unknown[]) => unknown) => {
       if (evaluateOverride) {
         return Promise.resolve(evaluateOverride(fn));
       }
@@ -99,7 +99,7 @@ function createMockPage(opts: MockPageOptions = {}) {
     _setSelectors(s: Record<string, any>) {
       currentSelectors = { ...s };
     },
-    _setEvaluateOverride(fn: ((f: Function) => any) | null) {
+    _setEvaluateOverride(fn: ((f: (...args: unknown[]) => unknown) => unknown) | null) {
       evaluateOverride = fn;
     },
   };
