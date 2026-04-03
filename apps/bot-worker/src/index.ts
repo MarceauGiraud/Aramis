@@ -136,14 +136,4 @@ process.on('SIGINT', async () => {
 
 logger.info('Bot worker started and listening for jobs');
 
-// Clean up stuck meetings/sessions from previous crashes on startup
-import { cleanupStaleBots } from './commands/cleanup-stale-bots';
-cleanupStaleBots().catch((err) => logger.error(`Startup cleanup failed: ${err}`));
-
-// Run cleanup periodically (every 5 minutes)
-setInterval(
-  () => {
-    cleanupStaleBots().catch((err) => logger.error(`Periodic cleanup failed: ${err}`));
-  },
-  5 * 60 * 1000,
-);
+// Stale bot cleanup is handled by Kasar (cron checks meetings stuck in active status).
