@@ -399,14 +399,8 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Now prepare the UI. The trim will remove this setup period.
     await this.waitForWebRTCReady();
 
-    // Initialize the protobuf-based participant tracker.
-    // The browser-side UserManager is already injected by PER_PARTICIPANT_AUDIO_SCRIPT
-    // in base.ts; this class provides a typed Node-side API to read from it.
-    if (this.page) {
-      this.participantTracker = new GoogleMeetParticipantTracker(this.page);
-      await this.participantTracker.initialize();
-    }
-
+    // Critical UI setup FIRST (camera, mic, view) — these must happen quickly
+    // before the meeting ends or the zombie watchdog triggers.
     try {
       await this.page!.keyboard.press('F11');
     } catch {}
@@ -426,6 +420,15 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // the setup period (camera/mic toggle, view switch, etc.).
     this.meetingContentStartTime = Date.now();
     logger.info('Meeting content starts — UI ready, recording already running');
+
+    // Initialize the protobuf-based participant tracker AFTER UI is ready.
+    // This can take up to 30s and must NOT block the recording setup.
+    if (this.page) {
+      this.participantTracker = new GoogleMeetParticipantTracker(this.page);
+      this.participantTracker.initialize().catch((err) => {
+        logger.warn(`ParticipantTracker init failed (non-fatal): ${err}`);
+      });
+    }
   }
 
   /**
