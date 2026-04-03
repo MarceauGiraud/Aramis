@@ -966,7 +966,7 @@ export abstract class BaseMeetingBot {
       // If start trim would remove 80%+ of the recording, skip it
       if (trimStartSeconds !== undefined && trimStartSeconds > totalRecordingDurationSec * 0.8) {
         logger.warn(
-          `Skipping start trim: ${trimStartSeconds.toFixed(1)}s exceeds 80% of total recording (${totalRecordingDurationSec.toFixed(1)}s)`
+          `Skipping start trim: ${trimStartSeconds.toFixed(1)}s exceeds 80% of total recording (${totalRecordingDurationSec.toFixed(1)}s)`,
         );
         trimStartSeconds = undefined;
       }
@@ -983,7 +983,7 @@ export abstract class BaseMeetingBot {
 
       if (effectiveDuration < 5) {
         logger.warn(
-          `Skipping trim: resulting duration would be too short (${effectiveDuration.toFixed(1)}s), keeping full recording`
+          `Skipping trim: resulting duration would be too short (${effectiveDuration.toFixed(1)}s), keeping full recording`,
         );
         trimStartSeconds = undefined;
         trimEndSeconds = undefined;
@@ -1146,10 +1146,7 @@ export abstract class BaseMeetingBot {
       // "alone" UI indicators, kicked indicators, and URL changes.
 
       const wakeup = this.createWakeupPromise();
-      await Promise.race([
-        this.sleep(checkInterval),
-        wakeup,
-      ]);
+      await Promise.race([this.sleep(checkInterval), wakeup]);
     }
   }
 

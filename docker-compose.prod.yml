@@ -1,29 +1,12 @@
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: aramis-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   bot-worker:
     build:
       context: .
       dockerfile: apps/bot-worker/Dockerfile
     restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
     env_file:
       - .env.prod
     environment:
-      - REDIS_URL=redis://redis:6379
       - BOT_CONCURRENCY=2
       - NODE_ENV=production
       - BOT_HEADLESS=false
@@ -41,6 +24,3 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-volumes:
-  redis-data:

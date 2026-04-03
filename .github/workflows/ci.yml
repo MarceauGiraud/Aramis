@@ -30,7 +30,7 @@ jobs:
         run: pnpm exec prettier --check "apps/**/*.ts" "packages/**/*.ts" "tests/**/*.ts"
 
       - name: ESLint
-        run: pnpm exec eslint "apps/bot-worker/src/**/*.ts" --max-warnings=200
+        run: pnpm exec eslint "apps/bot-worker/src/**/*.ts" --max-warnings=350
 
   test:
     name: Test

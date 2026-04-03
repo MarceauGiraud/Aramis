@@ -90,10 +90,18 @@ function createMockPage(opts: MockPageOptions = {}) {
     screenshot: vi.fn().mockResolvedValue(Buffer.from('')),
 
     // Helpers for test mutation
-    _setUrl(u: string) { currentUrl = u; },
-    _setBodyText(t: string) { currentBodyText = t; },
-    _setSelectors(s: Record<string, any>) { currentSelectors = { ...s }; },
-    _setEvaluateOverride(fn: ((f: Function) => any) | null) { evaluateOverride = fn; },
+    _setUrl(u: string) {
+      currentUrl = u;
+    },
+    _setBodyText(t: string) {
+      currentBodyText = t;
+    },
+    _setSelectors(s: Record<string, any>) {
+      currentSelectors = { ...s };
+    },
+    _setEvaluateOverride(fn: ((f: Function) => any) | null) {
+      evaluateOverride = fn;
+    },
   };
 
   return page;
@@ -723,8 +731,9 @@ describe('TeamsBot', () => {
 
     it('should return false when pre-join button is still visible', async () => {
       const { bot } = createTeamsBot();
-      (bot as any).hasAnySelector = vi.fn()
-        .mockResolvedValueOnce(true)  // pre-join button found
+      (bot as any).hasAnySelector = vi
+        .fn()
+        .mockResolvedValueOnce(true) // pre-join button found
         .mockResolvedValue(false);
 
       const result = await bot.checkStillInMeeting();
@@ -733,7 +742,8 @@ describe('TeamsBot', () => {
 
     it('should return true when hangup button is present', async () => {
       const { bot } = createTeamsBot();
-      (bot as any).hasAnySelector = vi.fn()
+      (bot as any).hasAnySelector = vi
+        .fn()
         .mockResolvedValueOnce(false) // no pre-join button
         .mockResolvedValueOnce(true); // meeting indicators found
 
@@ -743,7 +753,8 @@ describe('TeamsBot', () => {
 
     it('should return true when calling-unified-bar is present', async () => {
       const { bot } = createTeamsBot();
-      (bot as any).hasAnySelector = vi.fn()
+      (bot as any).hasAnySelector = vi
+        .fn()
         .mockResolvedValueOnce(false) // no pre-join button
         .mockResolvedValueOnce(true); // meeting indicators found
 

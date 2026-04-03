@@ -118,12 +118,8 @@ export class NativeSpeakerDetector extends EventEmitter {
               // Try multiple name resolution strategies (classic then v2)
               const nameEl = activeEl.querySelector(selectors.participantName);
               const nameFromAttr =
-                activeEl.getAttribute('data-participant-name') ||
-                activeEl.getAttribute('aria-label');
-              speakerName =
-                nameEl?.textContent?.trim() ||
-                nameFromAttr ||
-                null;
+                activeEl.getAttribute('data-participant-name') || activeEl.getAttribute('aria-label');
+              speakerName = nameEl?.textContent?.trim() || nameFromAttr || null;
             }
           } else if (platform === 'GOOGLE_MEET') {
             // Google Meet: chercher l'élément avec bordure active

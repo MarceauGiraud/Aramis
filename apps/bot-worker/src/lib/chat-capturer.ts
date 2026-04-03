@@ -124,11 +124,7 @@ export class ChatCapturer {
     const chatButtonSelectors: Record<MeetingPlatform, string[]> = {
       GOOGLE_MEET: ['[aria-label*="Chat" i]', '[aria-label*="chat" i]', '[data-tooltip*="Chat" i]'],
       ZOOM: ['[aria-label*="Chat" i]', '#chatButton', '.chat-button'],
-      TEAMS: [
-        '[data-tid="chat-button"]',
-        '[data-tid="meeting-chat-button"]',
-        '[aria-label*="Chat" i]',
-      ],
+      TEAMS: ['[data-tid="chat-button"]', '[data-tid="meeting-chat-button"]', '[aria-label*="Chat" i]'],
     };
 
     const selectors = chatButtonSelectors[this.platform];

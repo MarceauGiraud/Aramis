@@ -96,10 +96,7 @@ export class KasarClient {
 
   private sign(timestamp: string, body: string): string {
     const message = `${timestamp}.${body}`;
-    return crypto
-      .createHmac('sha256', MEETING_BOT_WEBHOOK_SECRET)
-      .update(message)
-      .digest('hex');
+    return crypto.createHmac('sha256', MEETING_BOT_WEBHOOK_SECRET).update(message).digest('hex');
   }
 
   // ------- Disk persistence for critical payloads -------
@@ -172,9 +169,7 @@ export class KasarClient {
         // No retry on 4xx (client error)
         if (response.status >= 400 && response.status < 500) {
           const text = await response.text().catch(() => '');
-          const err = new Error(
-            `Webhook returned ${response.status}: ${text}`,
-          );
+          const err = new Error(`Webhook returned ${response.status}: ${text}`);
           if (isCritical) {
             throw err;
           }
@@ -247,11 +242,7 @@ export class KasarClient {
 
   // ------- Public: send event -------
 
-  async sendEvent(
-    event: string,
-    meetingId: string,
-    data: Record<string, unknown> = {},
-  ): Promise<void> {
+  async sendEvent(event: string, meetingId: string, data: Record<string, unknown> = {}): Promise<void> {
     if (!KASAR_WEBHOOK_URL) {
       logger.warn('KASAR_WEBHOOK_URL not configured, skipping event', { event, meetingId });
       return;
@@ -292,47 +283,27 @@ export class KasarClient {
     await this.sendEvent('bot_waiting', meetingId, { reason });
   }
 
-  async sendTranscriptChunk(
-    meetingId: string,
-    segments: TranscriptSegment[],
-  ): Promise<void> {
+  async sendTranscriptChunk(meetingId: string, segments: TranscriptSegment[]): Promise<void> {
     await this.sendEvent('transcript_chunk', meetingId, { segments });
   }
 
-  async sendRecordingProgress(
-    meetingId: string,
-    duration: number,
-    fileSize: number,
-  ): Promise<void> {
+  async sendRecordingProgress(meetingId: string, duration: number, fileSize: number): Promise<void> {
     await this.sendEvent('recording_progress', meetingId, { duration, fileSize });
   }
 
-  async notifyRecordingComplete(
-    meetingId: string,
-    data: RecordingCompleteData,
-  ): Promise<void> {
+  async notifyRecordingComplete(meetingId: string, data: RecordingCompleteData): Promise<void> {
     await this.sendEvent('recording_complete', meetingId, { ...data });
   }
 
-  async notifyTranscriptionComplete(
-    meetingId: string,
-    transcript: TranscriptData,
-  ): Promise<void> {
+  async notifyTranscriptionComplete(meetingId: string, transcript: TranscriptData): Promise<void> {
     await this.sendEvent('transcription_complete', meetingId, { transcript });
   }
 
-  async notifyRecordingUploadFailed(
-    meetingId: string,
-    error: string,
-  ): Promise<void> {
+  async notifyRecordingUploadFailed(meetingId: string, error: string): Promise<void> {
     await this.sendEvent('recording_upload_failed', meetingId, { error });
   }
 
-  async notifyError(
-    meetingId: string,
-    error: string,
-    phase: string,
-  ): Promise<void> {
+  async notifyError(meetingId: string, error: string, phase: string): Promise<void> {
     await this.sendEvent('bot_error', meetingId, { error, phase });
   }
 

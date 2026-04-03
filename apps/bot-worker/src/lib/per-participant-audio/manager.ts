@@ -68,14 +68,17 @@ class LanguageDetector {
         const conf = _segment.confidence ?? 0;
         if (conf > 0) {
           candidate.confidences.push(conf);
-          candidate.avgConfidence =
-            candidate.confidences.reduce((a, b) => a + b, 0) / candidate.confidences.length;
+          candidate.avgConfidence = candidate.confidences.reduce((a, b) => a + b, 0) / candidate.confidences.length;
           this.checkResolution();
         }
       });
 
-      session.on('error', () => { /* ignore detection errors */ });
-      session.on('close', () => { /* ignore */ });
+      session.on('error', () => {
+        /* ignore detection errors */
+      });
+      session.on('close', () => {
+        /* ignore */
+      });
 
       this.candidates.push(candidate);
     }
@@ -90,7 +93,9 @@ class LanguageDetector {
   send(pcmBuffer: Buffer): void {
     if (this.resolved) return;
     for (const c of this.candidates) {
-      try { c.session.send(pcmBuffer); } catch {}
+      try {
+        c.session.send(pcmBuffer);
+      } catch {}
     }
   }
 
@@ -143,7 +148,9 @@ class LanguageDetector {
   private cleanup(): void {
     if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
     for (const c of this.candidates) {
-      try { c.session.close(); } catch {}
+      try {
+        c.session.close();
+      } catch {}
     }
     this.candidates = [];
   }

@@ -111,7 +111,7 @@ function setupCommandChannel(redisSub: IORedis, meetingId: string, bot: BaseMeet
 export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise<unknown> {
   const { redis, redisSub, transcriptionQueue, wsServer, workerId } = deps;
 
-  const { meetingId, meetingUrl, platform, botName, recordingConfig, metadata } = job.data;
+  const { meetingId, meetingUrl, platform, botName, recordingConfig } = job.data;
 
   // Validate required fields
   if (!meetingId || !meetingUrl || !platform) {
@@ -241,28 +241,38 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
             language: job.data.transcriptionConfig?.language,
           });
 
-          liveTranscription.on('transcript', (segment: { text: string; speaker?: string; startTime: number; endTime: number; confidence?: number }, isFinal: boolean) => {
-            // Receiving a transcript proves humans are speaking in the meeting
-            bot.handleMeetingSignal({ type: 'HumanSpeechDetected' });
+          liveTranscription.on(
+            'transcript',
+            (
+              segment: { text: string; speaker?: string; startTime: number; endTime: number; confidence?: number },
+              isFinal: boolean,
+            ) => {
+              // Receiving a transcript proves humans are speaking in the meeting
+              bot.handleMeetingSignal({ type: 'HumanSpeechDetected' });
 
-            // Track metrics
-            promMetrics.transcriptionSegments.inc({
-              provider: job.data.transcriptionConfig?.provider || 'deepgram',
-              is_final: String(isFinal),
-            });
+              // Track metrics
+              promMetrics.transcriptionSegments.inc({
+                provider: job.data.transcriptionConfig?.provider || 'deepgram',
+                is_final: String(isFinal),
+              });
 
-            if (isFinal) {
-              kasarClient.sendTranscriptChunk(meetingId, [{
-                start: segment.startTime,
-                end: segment.endTime,
-                speaker: segment.speaker || 'Unknown',
-                text: segment.text,
-                confidence: segment.confidence,
-              }]).catch(err => logger.warn(`Transcript chunk send failed: ${err}`));
-            }
-            // Forward to WebSocket clients
-            wsServer.broadcastTranscript(meetingId, segment, isFinal);
-          });
+              if (isFinal) {
+                kasarClient
+                  .sendTranscriptChunk(meetingId, [
+                    {
+                      start: segment.startTime,
+                      end: segment.endTime,
+                      speaker: segment.speaker || 'Unknown',
+                      text: segment.text,
+                      confidence: segment.confidence,
+                    },
+                  ])
+                  .catch((err) => logger.warn(`Transcript chunk send failed: ${err}`));
+              }
+              // Forward to WebSocket clients
+              wsServer.broadcastTranscript(meetingId, segment, isFinal);
+            },
+          );
 
           // Only pipe mixed audio to Deepgram when per-participant is NOT active.
           // Per-participant handles transcription independently -- running both
@@ -276,20 +286,30 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
 
           // Wire per-participant audio transcription if available (overrides mixed audio diarization)
           if (perParticipantManager) {
-            perParticipantManager.on('transcript', (segment: { text?: string; speaker?: string; startTime?: number; endTime?: number; confidence?: number }, isFinal: boolean) => {
-              if (isFinal && segment.text) {
-                logger.info(`[Per-participant] ${segment.speaker}: ${segment.text}`);
-              }
-              // Broadcast via WebSocket
-              if (wsServer) {
-                wsServer.broadcastTranscript(meetingId, {
-                  text: segment.text || '',
-                  speaker: segment.speaker,
-                  startTime: segment.startTime || 0,
-                  endTime: segment.endTime || 0,
-                }, isFinal);
-              }
-            });
+            perParticipantManager.on(
+              'transcript',
+              (
+                segment: { text?: string; speaker?: string; startTime?: number; endTime?: number; confidence?: number },
+                isFinal: boolean,
+              ) => {
+                if (isFinal && segment.text) {
+                  logger.info(`[Per-participant] ${segment.speaker}: ${segment.text}`);
+                }
+                // Broadcast via WebSocket
+                if (wsServer) {
+                  wsServer.broadcastTranscript(
+                    meetingId,
+                    {
+                      text: segment.text || '',
+                      speaker: segment.speaker,
+                      startTime: segment.startTime || 0,
+                      endTime: segment.endTime || 0,
+                    },
+                    isFinal,
+                  );
+                }
+              },
+            );
             logger.info('Per-participant audio transcription wired for meeting ' + meetingId);
 
             // Wire binary WebSocket per-participant audio to the manager
@@ -326,7 +346,11 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     }
 
     // Stop live transcription and collect segments in memory
-    let liveTranscriptData: { fullText: string; segments: Array<{ start: number; end: number; speaker: string; text: string; confidence?: number }>; speakers: Array<{ id: string; label: string; identifiedName?: string; totalDuration: number }> } | null = null;
+    let liveTranscriptData: {
+      fullText: string;
+      segments: Array<{ start: number; end: number; speaker: string; text: string; confidence?: number }>;
+      speakers: Array<{ id: string; label: string; identifiedName?: string; totalDuration: number }>;
+    } | null = null;
     if (liveTranscription) {
       try {
         await liveTranscription.stop();
@@ -337,8 +361,8 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
           if (speakerHistory.length > 0) {
             const reconciler = new SpeakerReconciler();
             const mapping = reconciler.reconcile(
-              segments.map(s => ({ speaker: s.speaker, startTime: s.startTime, endTime: s.endTime })),
-              speakerHistory
+              segments.map((s) => ({ speaker: s.speaker, startTime: s.startTime, endTime: s.endTime })),
+              speakerHistory,
             );
             // Apply reconciled names to segments
             for (const seg of segments) {
@@ -350,23 +374,23 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
           }
 
           // Collect unique speakers
-          const speakerLabels = [...new Set(segments.map(s => s.speaker).filter(Boolean))] as string[];
-          const fullText = segments.map(s => s.text).join(' ');
+          const speakerLabels = [...new Set(segments.map((s) => s.speaker).filter(Boolean))] as string[];
+          const fullText = segments.map((s) => s.text).join(' ');
           liveTranscriptData = {
             fullText,
-            segments: segments.map(s => ({
+            segments: segments.map((s) => ({
               start: s.startTime,
               end: s.endTime,
               speaker: s.speaker || 'Unknown',
               text: s.text,
               confidence: s.confidence,
             })),
-            speakers: speakerLabels.map(label => ({
+            speakers: speakerLabels.map((label) => ({
               id: label,
               label,
               identifiedName: label,
               totalDuration: segments
-                .filter(s => s.speaker === label)
+                .filter((s) => s.speaker === label)
                 .reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
             })),
           };
@@ -404,9 +428,11 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
           // No local recording either -- mark as failed but do NOT throw
           // (throwing would trigger BullMQ retry which re-joins the meeting)
           logger.error(`No recording available for ${meetingId} after save failure`);
-          await kasarClient.notifyError(meetingId, `Recording save failed: ${saveMsg}`, 'save_recording').catch(err => {
-            logger.error(`Failed to notify Kasar of error: ${err}`);
-          });
+          await kasarClient
+            .notifyError(meetingId, `Recording save failed: ${saveMsg}`, 'save_recording')
+            .catch((err) => {
+              logger.error(`Failed to notify Kasar of error: ${err}`);
+            });
           return { success: false, reason: 'recording_save_failed', error: saveMsg };
         }
 
@@ -416,7 +442,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
 
     // Collect chat messages
     const chatMessages = bot.getChatMessages();
-    const chatData = chatMessages.map(msg => ({
+    const chatData = chatMessages.map((msg) => ({
       sender: msg.sender,
       message: msg.message,
       timestamp: msg.timestamp?.toISOString?.() || new Date().toISOString(),
@@ -432,14 +458,14 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     try {
       const extractedParticipants = await bot.extractParticipants();
       if (extractedParticipants.length > 0) {
-        participantsData = extractedParticipants.map(p => ({
+        participantsData = extractedParticipants.map((p) => ({
           name: p.name,
           email: p.email ?? undefined,
           isHost: p.isHost ?? false,
         }));
       } else {
-        const speakerNames = [...new Set(bot.getSpeakerHistory().map(s => s.speaker))];
-        participantsData = speakerNames.map(name => ({ name, isHost: false }));
+        const speakerNames = [...new Set(bot.getSpeakerHistory().map((s) => s.speaker))];
+        participantsData = speakerNames.map((name) => ({ name, isHost: false }));
       }
     } catch (err) {
       logger.warn(`Failed to extract participants: ${err}`);
@@ -465,18 +491,18 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     if (perParticipantSegments && perParticipantSegments.length > 0) {
       logger.info(`Per-participant produced ${perParticipantSegments.length} segments — using as final transcript`);
 
-      const fullText = perParticipantSegments.map(s => s.text).join(' ');
-      const speakerNames = [...new Set(perParticipantSegments.map(s => s.speaker).filter(Boolean))] as string[];
+      const fullText = perParticipantSegments.map((s) => s.text).join(' ');
+      const speakerNames = [...new Set(perParticipantSegments.map((s) => s.speaker).filter(Boolean))] as string[];
       liveTranscriptData = {
         fullText,
-        segments: perParticipantSegments.map(s => ({
+        segments: perParticipantSegments.map((s) => ({
           start: s.startTime,
           end: s.endTime,
           speaker: s.speaker || 'Unknown',
           text: s.text,
           confidence: undefined,
         })),
-        speakers: speakerNames.map(name => ({
+        speakers: speakerNames.map((name) => ({
           id: name,
           label: name,
           identifiedName: name,
@@ -515,12 +541,14 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     promMetrics.meetingDuration.observe((Date.now() - jobStartTime) / 1000);
 
     // Build transcript payload
-    const transcriptPayload = liveTranscriptData ? {
-      fullText: liveTranscriptData.fullText,
-      segments: liveTranscriptData.segments,
-      speakers: liveTranscriptData.speakers,
-      provider: job.data.transcriptionConfig?.provider || 'deepgram',
-    } : undefined;
+    const transcriptPayload = liveTranscriptData
+      ? {
+          fullText: liveTranscriptData.fullText,
+          segments: liveTranscriptData.segments,
+          speakers: liveTranscriptData.speakers,
+          provider: job.data.transcriptionConfig?.provider || 'deepgram',
+        }
+      : undefined;
 
     // Send everything to Kasar via notifyRecordingComplete
     await kasarClient.notifyRecordingComplete(meetingId, {
@@ -538,7 +566,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
     logger.error(`Error in meeting bot for ${meetingId}: ${errorMessage}`);
 
     // Notify Kasar of error
-    await kasarClient.notifyError(meetingId, errorMessage, 'meeting_bot').catch(err => {
+    await kasarClient.notifyError(meetingId, errorMessage, 'meeting_bot').catch((err) => {
       logger.error(`Failed to notify Kasar of error: ${err}`);
     });
 

@@ -154,14 +154,10 @@ export class TeamsBot extends BaseMeetingBot {
               // which poison meetingSignal and cause premature exit once
               // the bot actually joins.
               if (!this.joinedSuccessfully) {
-                logger.info(
-                  `Ignoring "${keyword}" WebSocket signal (bot not yet in meeting)`,
-                );
+                logger.info(`Ignoring "${keyword}" WebSocket signal (bot not yet in meeting)`);
                 return;
               }
-              logger.info(
-                `WebSocket signal detected: "${keyword}" -> ${change} (ws: ${url.substring(0, 80)})`,
-              );
+              logger.info(`WebSocket signal detected: "${keyword}" -> ${change} (ws: ${url.substring(0, 80)})`);
               this.handleMeetingSignal({ type: 'MeetingStatusChange', change });
               return; // First match wins; avoid duplicate signals from the same frame
             }
@@ -172,11 +168,7 @@ export class TeamsBot extends BaseMeetingBot {
           // join or leave. We extract the count and feed it to the base
           // class roster tracking so the zombie watchdog works.
           try {
-            if (
-              payload.includes('participants') ||
-              payload.includes('roster') ||
-              payload.includes('endpointDetails')
-            ) {
+            if (payload.includes('participants') || payload.includes('roster') || payload.includes('endpointDetails')) {
               const data = JSON.parse(payload);
               const count = this.extractParticipantCountFromSignal(data);
               if (count !== null) {
@@ -219,9 +211,7 @@ export class TeamsBot extends BaseMeetingBot {
         return active.length;
       }
       if (Array.isArray(data.roster)) {
-        const active = data.roster.filter(
-          (p: any) => p.state === 'Connected' || !p.state,
-        );
+        const active = data.roster.filter((p: any) => p.state === 'Connected' || !p.state);
         this.extractNamesFromRosterArray(active);
         return active.length;
       }
@@ -255,11 +245,7 @@ export class TeamsBot extends BaseMeetingBot {
     for (let i = 0; i < entries.length; i++) {
       const p = entries[i];
       const name: string | undefined =
-        p.displayName ??
-        p.name ??
-        p.identity?.user?.displayName ??
-        p.user?.displayName ??
-        undefined;
+        p.displayName ?? p.name ?? p.identity?.user?.displayName ?? p.user?.displayName ?? undefined;
 
       if (name && typeof name === 'string' && name.trim()) {
         const id: string = p.id ?? p.participantId ?? p.mri ?? String(i);
@@ -296,11 +282,16 @@ export class TeamsBot extends BaseMeetingBot {
     ].join(', ');
 
     try {
-      const panelOpened = await this.page.evaluate((sels) => {
-        const btn = document.querySelector(sels) as HTMLElement | null;
-        if (btn) { btn.click(); return true; }
-        return false;
-      }, rosterBtnSelectors).catch(() => false);
+      const panelOpened = await this.page
+        .evaluate((sels) => {
+          const btn = document.querySelector(sels) as HTMLElement | null;
+          if (btn) {
+            btn.click();
+            return true;
+          }
+          return false;
+        }, rosterBtnSelectors)
+        .catch(() => false);
 
       if (!panelOpened) return;
       await this.sleep(1500);
@@ -333,10 +324,12 @@ export class TeamsBot extends BaseMeetingBot {
       });
 
       // Close the roster panel
-      await this.page.evaluate((sels) => {
-        const btn = document.querySelector(sels) as HTMLElement | null;
-        if (btn) btn.click();
-      }, rosterBtnSelectors).catch(() => {});
+      await this.page
+        .evaluate((sels) => {
+          const btn = document.querySelector(sels) as HTMLElement | null;
+          if (btn) btn.click();
+        }, rosterBtnSelectors)
+        .catch(() => {});
 
       // Store scraped names (deduplicated)
       for (const name of names) {
@@ -599,9 +592,7 @@ export class TeamsBot extends BaseMeetingBot {
           const isUnmuted =
             ariaPressed === 'true' ||
             ariaChecked === 'true' ||
-            (ariaLabel.includes('mute') &&
-              !ariaLabel.includes('unmute') &&
-              !ariaLabel.includes('activer'));
+            (ariaLabel.includes('mute') && !ariaLabel.includes('unmute') && !ariaLabel.includes('activer'));
 
           if (isUnmuted) {
             btn.click();
@@ -705,11 +696,16 @@ export class TeamsBot extends BaseMeetingBot {
       // Use page.evaluate() for all clicks to bypass the recording overlay
       // (app-layout-area--main at z-index 1999 intercepts Playwright clicks)
       const allViewBtnSels = viewBtnSelectors.join(', ');
-      const clicked = await this.page.evaluate((sels) => {
-        const btn = document.querySelector(sels) as HTMLElement | null;
-        if (btn) { btn.click(); return true; }
-        return false;
-      }, allViewBtnSels).catch(() => false);
+      const clicked = await this.page
+        .evaluate((sels) => {
+          const btn = document.querySelector(sels) as HTMLElement | null;
+          if (btn) {
+            btn.click();
+            return true;
+          }
+          return false;
+        }, allViewBtnSels)
+        .catch(() => false);
 
       if (!clicked) {
         logger.info('Layout button not found — using default layout');
@@ -724,11 +720,16 @@ export class TeamsBot extends BaseMeetingBot {
           ? '#custom-view-button-MixedGridButton, #MixedGrid-button, #MixedGridView-button, [aria-label*="Gallery" i]'
           : '#custom-view-button-SpeakerViewButton, #SpeakerView-button, [aria-label*="Speaker" i]';
 
-      const selected = await this.page.evaluate((sels) => {
-        const option = document.querySelector(sels) as HTMLElement | null;
-        if (option) { option.click(); return option.id || option.getAttribute('aria-label') || 'found'; }
-        return null;
-      }, viewSelectors).catch(() => null);
+      const selected = await this.page
+        .evaluate((sels) => {
+          const option = document.querySelector(sels) as HTMLElement | null;
+          if (option) {
+            option.click();
+            return option.id || option.getAttribute('aria-label') || 'found';
+          }
+          return null;
+        }, viewSelectors)
+        .catch(() => null);
 
       if (selected) {
         logger.info(`Layout set to ${view} via ${selected}`);
@@ -1649,9 +1650,7 @@ export class TeamsBot extends BaseMeetingBot {
           // "Rejoin" button means we were kicked — but ONLY if there's an
           // actual Rejoin button AND no hangup button (otherwise the word
           // "Rejoin" may appear in other contexts while still in lobby).
-          const hasRejoinBtn = Array.from(
-            document.querySelectorAll('button, [role="button"]'),
-          ).some((el) => {
+          const hasRejoinBtn = Array.from(document.querySelectorAll('button, [role="button"]')).some((el) => {
             const txt = (el as HTMLElement).textContent?.trim().toLowerCase();
             return txt === 'rejoin' || txt === 'rejoindre';
           });
@@ -1837,9 +1836,7 @@ export class TeamsBot extends BaseMeetingBot {
         }
 
         // Method 5: Check if hangup button exists (means we're in a meeting)
-        const hangup = document.querySelector(
-          '[data-inp="hangup-button"], #hangup-button, [data-tid="hangup-button"]',
-        );
+        const hangup = document.querySelector('[data-inp="hangup-button"], #hangup-button, [data-tid="hangup-button"]');
         if (!hangup) return 0; // Not in meeting at all
 
         // Hangup exists but couldn't determine count — return -1 to signal
@@ -2093,9 +2090,7 @@ export class TeamsBot extends BaseMeetingBot {
     ];
 
     // Use page.evaluate() for leave click to bypass the recording overlay
-    const allLeaveSels = leaveSelectors
-      .filter((s) => !s.startsWith('button:has-text'))
-      .join(', ');
+    const allLeaveSels = leaveSelectors.filter((s) => !s.startsWith('button:has-text')).join(', ');
     const leftViaJs = await this.page
       .evaluate((sels) => {
         const btn = document.querySelector(sels) as HTMLElement | null;
@@ -2114,13 +2109,13 @@ export class TeamsBot extends BaseMeetingBot {
       // Confirm leave dialog via JS
       await this.page
         .evaluate(() => {
-          const confirmSels = [
-            '[data-tid="confirm-leave"]',
-            '[data-tid="leave-confirm"]',
-          ];
+          const confirmSels = ['[data-tid="confirm-leave"]', '[data-tid="leave-confirm"]'];
           for (const sel of confirmSels) {
             const btn = document.querySelector(sel) as HTMLElement | null;
-            if (btn) { btn.click(); return; }
+            if (btn) {
+              btn.click();
+              return;
+            }
           }
           // Fallback: find button containing "Leave" or "Quitter"
           const buttons = document.querySelectorAll('button, [role="button"]');
