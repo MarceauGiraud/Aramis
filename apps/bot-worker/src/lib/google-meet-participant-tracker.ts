@@ -139,14 +139,15 @@ export class GoogleMeetParticipantTracker {
     try {
       const state = await this.queryUserManager();
       if (state && state.participants.length > 0) {
-        // Deduplicate by name — the same person can have multiple deviceIds
-        // (e.g. one for audio+video and one for a second video stream).
-        // Keep the first occurrence so the isHost flag is preserved.
+        // Deduplicate by deviceId only (not by name — two different people can share the same name).
+        // A single person can have multiple deviceIds (audio device + video device),
+        // but each deviceId is unique to a stream, not a person.
+        // We keep all participants with distinct deviceIds.
         const seen = new Set<string>();
         const deduped = state.participants.filter((p) => {
-          const key = p.name.toLowerCase().trim();
-          if (seen.has(key)) return false;
-          seen.add(key);
+          if (!p.deviceId) return true;
+          if (seen.has(p.deviceId)) return false;
+          seen.add(p.deviceId);
           return true;
         });
         return deduped;

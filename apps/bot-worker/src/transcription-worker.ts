@@ -62,7 +62,9 @@ export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
       let speakerNameMapping: Map<string, string> | null = null;
 
       // Fast path: single non-bot participant → map ALL speaker labels to that name
-      const nonBotParticipants = participants?.filter((p) => !p.name.toLowerCase().includes('aramis')) ?? [];
+      const botKeywords = ['aramis', 'kasar', 'recorder', 'bot'];
+      const nonBotParticipants =
+        participants?.filter((p) => !botKeywords.some((kw) => p.name.toLowerCase().includes(kw))) ?? [];
       if (nonBotParticipants.length === 1 && result.speakers.length >= 1) {
         const singleName = nonBotParticipants[0].name;
         speakerNameMapping = new Map();
