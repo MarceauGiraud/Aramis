@@ -136,7 +136,11 @@ export abstract class BaseMeetingBot {
   protected lastRosterParticipantCount: number | null = null;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
-    this.config = config;
+    // Normalize platform to uppercase (Kasar sends lowercase, Aramis expects uppercase)
+    this.config = {
+      ...config,
+      platform: config.platform.toUpperCase().replace(/-/g, '_') as BotConfig['platform'],
+    };
     this.options = {
       headless: options.headless ?? process.env.BOT_HEADLESS !== 'false',
       debug: options.debug ?? process.env.BOT_DEBUG === 'true',

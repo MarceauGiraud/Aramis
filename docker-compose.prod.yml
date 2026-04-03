@@ -7,16 +7,16 @@ services:
     env_file:
       - .env.prod
     environment:
-      - BOT_CONCURRENCY=2
+      - BOT_CONCURRENCY=1
       - NODE_ENV=production
       - BOT_HEADLESS=false
       - BOT_DEBUG=false
-    shm_size: '2gb'
+    shm_size: '4gb'
     deploy:
       resources:
         limits:
           cpus: '4'
-          memory: 4G
+          memory: 7G
     ports:
       - "8765:8765"
     logging:
