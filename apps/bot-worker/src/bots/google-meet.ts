@@ -391,16 +391,8 @@ export class GoogleMeetBot extends BaseMeetingBot {
     logger.info('Successfully joined Google Meet');
     await this.takeDebugScreenshot('07_joined_successfully');
 
-    // Start recording immediately — FFmpeg x11grab captures the screen
-    // regardless of what's on it, so it's safe to start early and trim later.
-    // This avoids losing meeting content while the UI setup runs (~10s).
-    await this.startRecording();
-
-    // Now prepare the UI. The trim will remove this setup period.
-    await this.waitForWebRTCReady();
-
-    // Critical UI setup FIRST (camera, mic, view) — these must happen quickly
-    // before the meeting ends or the zombie watchdog triggers.
+    // Critical UI setup IMMEDIATELY after join — must happen before zombie watchdog.
+    // These don't need WebRTC or recording to be running.
     try {
       await this.page!.keyboard.press('F11');
     } catch {}
@@ -408,21 +400,26 @@ export class GoogleMeetBot extends BaseMeetingBot {
     await this.turnOffCamera();
     await this.turnOffMicrophone();
 
+    // Inject CSS to hide bot's self-view and set speaker/gallery layout
     if (this.page) {
       this.meetUIController = new MeetUIController(this.page);
       const view = this.config.recordingConfig?.view ?? 'speaker';
       await this.meetUIController.setView(view);
     }
 
+    // Start recording after UI is clean (camera off, mic off, self-view hidden)
+    await this.startRecording();
+
+    // Wait for WebRTC with a strict timeout — don't block if it fails
+    await this.waitForWebRTCReady();
+
     await this.waitForMeetingUIReady();
 
-    // Mark content start AFTER UI is ready — the trim correctly removes
-    // the setup period (camera/mic toggle, view switch, etc.).
+    // Mark content start — the trim removes everything before this point
     this.meetingContentStartTime = Date.now();
     logger.info('Meeting content starts — UI ready, recording already running');
 
-    // Initialize the protobuf-based participant tracker AFTER UI is ready.
-    // This can take up to 30s and must NOT block the recording setup.
+    // Initialize the protobuf-based participant tracker in the background.
     if (this.page) {
       this.participantTracker = new GoogleMeetParticipantTracker(this.page);
       this.participantTracker.initialize().catch((err) => {
