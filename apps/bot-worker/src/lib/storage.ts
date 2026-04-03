@@ -1,19 +1,10 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './logger';
-
-const s3Client = new S3Client({
-  endpoint: process.env.S3_ENDPOINT,
-  region: process.env.S3_REGION || 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY || '',
-    secretAccessKey: process.env.S3_SECRET_KEY || '',
-  },
-  forcePathStyle: true, // Required for MinIO
-});
+import { getS3Client } from './s3-config';
 
 const BUCKET = process.env.S3_BUCKET || 'recordings';
 const ALLOWED_UPLOAD_DIR = '/tmp/recordings';
@@ -52,7 +43,7 @@ export async function uploadRecording(localPath: string, meetingId: string): Pro
   const fileStats = fs.statSync(localPath);
 
   const upload = new Upload({
-    client: s3Client,
+    client: getS3Client(),
     params: {
       Bucket: BUCKET,
       Key: key,
@@ -85,7 +76,7 @@ export async function getPresignedUrl(key: string): Promise<string> {
     Key: key,
   });
 
-  return getSignedUrl(s3Client, command, { expiresIn: 3600 });
+  return getSignedUrl(getS3Client(), command, { expiresIn: 3600 });
 }
 
 /**
@@ -105,7 +96,7 @@ export async function uploadAudio(localPath: string, meetingId: string): Promise
   const fileStats = fs.statSync(localPath);
 
   const upload = new Upload({
-    client: s3Client,
+    client: getS3Client(),
     params: {
       Bucket: BUCKET,
       Key: key,

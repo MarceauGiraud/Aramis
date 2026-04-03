@@ -29,10 +29,10 @@ import { spawn, ChildProcess, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Readable, PassThrough } from 'stream';
-import { S3Client } from '@aws-sdk/client-s3';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { logger } from './logger';
-import { isS3Configured } from './s3-config';
+import { isS3Configured, getS3Client } from './s3-config';
 import { ChunkUploader } from './chunk-uploader';
 import { FORMAT_CONFIG, RESOLUTION_MAP } from '@aramis/shared';
 import type { RecordingFormat, Resolution } from '@aramis/shared';
@@ -253,17 +253,9 @@ export class RecordingOrchestrator extends EventEmitter {
       captureMode: config.captureMode ?? 'x11grab',
     };
 
-    // Initialize S3 client if configured
+    // Initialize S3 client if configured (singleton shared across all modules)
     if (isS3Configured()) {
-      this.s3Client = new S3Client({
-        endpoint: process.env.S3_ENDPOINT,
-        region: process.env.S3_REGION || 'us-east-1',
-        credentials: {
-          accessKeyId: process.env.S3_ACCESS_KEY || '',
-          secretAccessKey: process.env.S3_SECRET_KEY || '',
-        },
-        forcePathStyle: true,
-      });
+      this.s3Client = getS3Client();
     }
   }
 
@@ -523,6 +515,10 @@ export class RecordingOrchestrator extends EventEmitter {
           this.chunkUploader = null; // fall through to full upload
         }
       }
+
+      // Give Supabase Storage time to finalize the multipart upload
+      // before starting another upload with the same S3Client
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       // Upload to S3 if requested and configured
       if (upload && this.s3Client) {
@@ -1405,64 +1401,75 @@ export class RecordingOrchestrator extends EventEmitter {
 
     const filename = path.basename(localPath);
     const key = `${this.config.s3KeyPrefix}/${this.config.meetingId}/${filename}`;
-
-    logger.info(`Uploading ${type} to S3: ${key}`);
-
-    const fileStream = fs.createReadStream(localPath);
     const fileStats = fs.statSync(localPath);
+    const maxRetries = 3;
 
-    const upload = new Upload({
-      client: this.s3Client,
-      params: {
-        Bucket: this.config.s3Bucket,
-        Key: key,
-        Body: fileStream,
-        ContentType: contentType,
-        ContentLength: fileStats.size,
-      },
-      partSize: 10 * 1024 * 1024, // 10MB chunks
-      queueSize: 4,
-    });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger.info(`Uploading ${type} to S3: ${key} (attempt ${attempt}/${maxRetries})`);
 
-    upload.on('httpUploadProgress', (progress: { loaded?: number; total?: number }) => {
-      if (progress.loaded && progress.total) {
-        const percentage = Math.round((progress.loaded / progress.total) * 100);
-        logger.debug(`Upload progress (${type}): ${percentage}%`);
+        const fileStream = fs.createReadStream(localPath);
+
+        const upload = new Upload({
+          client: this.s3Client,
+          params: {
+            Bucket: this.config.s3Bucket,
+            Key: key,
+            Body: fileStream,
+            ContentType: contentType,
+            ContentLength: fileStats.size,
+          },
+          partSize: 10 * 1024 * 1024, // 10MB chunks
+          queueSize: 4,
+        });
+
+        upload.on('httpUploadProgress', (progress: { loaded?: number; total?: number }) => {
+          if (progress.loaded && progress.total) {
+            const percentage = Math.round((progress.loaded / progress.total) * 100);
+            logger.debug(`Upload progress (${type}): ${percentage}%`);
+          }
+        });
+
+        await upload.done();
+
+        const s3Url = `s3://${this.config.s3Bucket}/${key}`;
+
+        // Store URL based on type
+        switch (type) {
+          case 'video':
+            this.s3VideoUrl = s3Url;
+            break;
+          case 'audio':
+            this.s3AudioUrl = s3Url;
+            break;
+        }
+
+        // Emit chunk uploaded event
+        const chunkEvent: ChunkUploadedEvent = {
+          chunkIndex: this.chunkIndex++,
+          chunkPath: localPath,
+          s3Url,
+          type,
+          size: fileStats.size,
+        };
+        this.emit('chunk-uploaded', chunkEvent);
+        this.chunksUploaded++;
+
+        logger.info(`${type} uploaded to S3: ${s3Url}`);
+        return;
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.warn(`Upload attempt ${attempt}/${maxRetries} failed for ${key}: ${err.message}`);
+
+        if (attempt === maxRetries) {
+          logger.error(`Failed to upload ${type} after ${maxRetries} attempts: ${err.message}`);
+          this.emitError(err, 'upload', true);
+          throw error;
+        }
+
+        // Exponential backoff: 2s, 4s, 8s
+        await new Promise((resolve) => setTimeout(resolve, 2000 * Math.pow(2, attempt - 1)));
       }
-    });
-
-    try {
-      await upload.done();
-
-      const s3Url = `s3://${this.config.s3Bucket}/${key}`;
-
-      // Store URL based on type
-      switch (type) {
-        case 'video':
-          this.s3VideoUrl = s3Url;
-          break;
-        case 'audio':
-          this.s3AudioUrl = s3Url;
-          break;
-      }
-
-      // Emit chunk uploaded event
-      const chunkEvent: ChunkUploadedEvent = {
-        chunkIndex: this.chunkIndex++,
-        chunkPath: localPath,
-        s3Url,
-        type,
-        size: fileStats.size,
-      };
-      this.emit('chunk-uploaded', chunkEvent);
-      this.chunksUploaded++;
-
-      logger.info(`${type} uploaded to S3: ${s3Url}`);
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      logger.error(`Failed to upload ${type}: ${err.message}`);
-      this.emitError(err, 'upload', true);
-      throw error;
     }
   }
 

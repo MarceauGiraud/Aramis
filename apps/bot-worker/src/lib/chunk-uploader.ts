@@ -10,7 +10,7 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './logger';
-import { validateS3Config, isS3Configured } from './s3-config';
+import { isS3Configured, getS3Client } from './s3-config';
 
 /**
  * Configuration options for ChunkUploader
@@ -101,19 +101,8 @@ export class ChunkUploader {
       );
     }
 
-    const config = validateS3Config();
-
-    this.s3Client = new S3Client({
-      endpoint: config.endpoint,
-      region: config.region,
-      credentials: {
-        accessKeyId: config.accessKey,
-        secretAccessKey: config.secretKey,
-      },
-      forcePathStyle: true, // Required for MinIO
-    });
-
-    this.bucket = config.bucket;
+    this.s3Client = getS3Client();
+    this.bucket = process.env.S3_BUCKET!;
     this.options = { ...DEFAULT_OPTIONS, ...options };
   }
 

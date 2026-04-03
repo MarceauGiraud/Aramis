@@ -1,6 +1,8 @@
 /**
- * S3 Configuration validation
+ * S3 Configuration validation and singleton client
  */
+
+import { S3Client } from '@aws-sdk/client-s3';
 
 export interface S3Config {
   endpoint: string;
@@ -41,4 +43,24 @@ export function validateS3Config(): S3Config {
   }
 
   return { endpoint, region, accessKey, secretKey, bucket };
+}
+
+/**
+ * Singleton S3Client instance shared across all modules.
+ * Avoids multipart upload state conflicts on Supabase Storage
+ * that occur when multiple S3Client instances are used concurrently.
+ */
+let _client: S3Client | null = null;
+
+export function getS3Client(): S3Client {
+  if (!_client) {
+    const config = validateS3Config();
+    _client = new S3Client({
+      region: config.region,
+      endpoint: config.endpoint,
+      credentials: { accessKeyId: config.accessKey, secretAccessKey: config.secretKey },
+      forcePathStyle: true,
+    });
+  }
+  return _client;
 }
