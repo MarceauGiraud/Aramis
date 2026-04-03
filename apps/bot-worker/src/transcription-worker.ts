@@ -25,6 +25,8 @@ export interface TranscriptionJobData {
   model?: string;
   /** DOM-detected speaker timeline for reconciliation with diarization labels */
   speakerHistory?: DomSpeakerEvent[];
+  /** Participants detected by ParticipantTracker (DOM / CSRC mapping) */
+  participants?: Array<{ name: string; email?: string; isHost?: boolean }>;
 }
 
 export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
@@ -38,6 +40,7 @@ export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
         language,
         model,
         speakerHistory,
+        participants,
       } = job.data;
 
       logger.info(`Processing transcription job ${job.id} for meeting ${meetingId} using ${providerName}`);
@@ -57,7 +60,20 @@ export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
 
       // Reconcile anonymous diarization labels with real names from DOM detection
       let speakerNameMapping: Map<string, string> | null = null;
-      if (speakerHistory && speakerHistory.length > 0) {
+
+      // Fast path: single non-bot participant → map ALL speaker labels to that name
+      const nonBotParticipants = participants?.filter((p) => !p.name.toLowerCase().includes('aramis')) ?? [];
+      if (nonBotParticipants.length === 1 && result.speakers.length >= 1) {
+        const singleName = nonBotParticipants[0].name;
+        speakerNameMapping = new Map();
+        for (const label of result.speakers) {
+          speakerNameMapping.set(label, singleName);
+        }
+        logger.info(
+          `Single-participant mapping for meeting ${meetingId}: all ${result.speakers.length} labels → "${singleName}"`,
+        );
+      } else if (speakerHistory && speakerHistory.length > 0) {
+        // Multi-speaker: use temporal overlap reconciliation
         try {
           const reconciler = new SpeakerReconciler();
           const mapping = reconciler.reconcile(result.segments, speakerHistory);
@@ -70,6 +86,19 @@ export function createTranscriptionWorker(redis: IORedis, prefix = 'bull') {
           }
         } catch (error) {
           logger.warn(`Speaker reconciliation failed (non-fatal): ${error}`);
+        }
+      } else if (nonBotParticipants.length > 0 && result.speakers.length > 0) {
+        // No speaker history but we have participants — try positional mapping
+        // if same count of speakers and participants
+        if (nonBotParticipants.length === result.speakers.length) {
+          speakerNameMapping = new Map();
+          for (let i = 0; i < result.speakers.length; i++) {
+            speakerNameMapping.set(result.speakers[i], nonBotParticipants[i].name);
+          }
+          logger.info(
+            `Positional speaker mapping for meeting ${meetingId}: ` +
+              `${result.speakers.length} labels matched to ${nonBotParticipants.length} participants`,
+          );
         }
       }
 

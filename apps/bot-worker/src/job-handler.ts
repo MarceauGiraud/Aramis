@@ -1,7 +1,7 @@
 import { Job, Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { BOT_CONFIG, BOT_COMMANDS_CHANNEL } from '@aramis/shared';
-import type { BotCommand, RecordingConfig } from '@aramis/shared';
+import { BOT_CONFIG, BOT_COMMANDS_CHANNEL, RESOLUTION_MAP } from '@aramis/shared';
+import type { BotCommand, RecordingConfig, Resolution } from '@aramis/shared';
 import { MeetingBotFactory } from './bots/factory';
 import { BaseMeetingBot } from './bots/base';
 import { logger } from './lib/logger';
@@ -147,8 +147,14 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
   await redis.set(`bot:active:${meetingId}`, workerId, 'EX', 14400); // 4h TTL
 
   // Create the appropriate bot for the platform
-  // Allocate a unique display + PulseAudio sink for this bot
-  const display = await displayAllocator.allocate(meetingId);
+  // Allocate a unique display + PulseAudio sink for this bot.
+  // Pass the video resolution so Xvfb matches (720p = much lighter than 1080p).
+  const resolutionPreset: Resolution = (recordingConfig as RecordingConfig | undefined)?.resolution ?? '720p';
+  const videoRes = RESOLUTION_MAP[resolutionPreset];
+  const display = await displayAllocator.allocate(meetingId, {
+    width: videoRes.width,
+    height: videoRes.height + 110, // extra height for Chrome toolbar, cropped by FFmpeg
+  });
 
   const bot = MeetingBotFactory.create(platform, {
     meetingId,
@@ -522,6 +528,7 @@ export async function processMeetingJob(job: Job, deps: JobHandlerDeps): Promise
               model: 'nova-3',
               language: 'detect',
               speakerHistory: speakerHistory.length > 0 ? speakerHistory : undefined,
+              participants: participantsData.length > 0 ? participantsData : undefined,
             },
             {
               attempts: 3,

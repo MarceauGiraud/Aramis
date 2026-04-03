@@ -52,8 +52,10 @@ export class DisplayAllocator {
 
   /**
    * Allocate a unique display + PulseAudio sink for a meeting bot.
+   * @param meetingId Unique meeting identifier
+   * @param resolution Optional per-meeting resolution override (width x height including chrome margin)
    */
-  async allocate(meetingId: string): Promise<DisplayAllocation> {
+  async allocate(meetingId: string, resolution?: { width: number; height: number }): Promise<DisplayAllocation> {
     // If already allocated for this meeting, return existing
     const existing = this.allocations.get(meetingId);
     if (existing) {
@@ -72,9 +74,12 @@ export class DisplayAllocator {
     let pulseModuleIndex: number | null = null;
     let pulseSilenceModuleIndex: number | null = null;
 
+    // Use per-meeting resolution if provided, otherwise fall back to the instance default
+    const effectiveResolution = resolution ?? this.resolution;
+
     try {
       // Start Xvfb
-      xvfbProcess = await this.startXvfb(displayNumber);
+      xvfbProcess = await this.startXvfb(displayNumber, effectiveResolution);
 
       // Start matchbox window manager for clean fullscreen (no window decorations)
       wmProcess = spawn('matchbox-window-manager', ['-use_titlebar', 'no', '-use_cursor', 'no'], {
@@ -213,7 +218,7 @@ export class DisplayAllocator {
     return display;
   }
 
-  private startXvfb(displayNumber: number): Promise<ChildProcess> {
+  private startXvfb(displayNumber: number, resolution?: { width: number; height: number }): Promise<ChildProcess> {
     return new Promise((resolve, reject) => {
       // Clean up stale lock file from previous crash
       try {
@@ -226,7 +231,7 @@ export class DisplayAllocator {
         /* ignore */
       }
 
-      const { width, height } = this.resolution;
+      const { width, height } = resolution ?? this.resolution;
       const args = [
         `:${displayNumber}`,
         '-screen',

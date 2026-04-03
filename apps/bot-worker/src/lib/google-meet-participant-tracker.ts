@@ -139,7 +139,17 @@ export class GoogleMeetParticipantTracker {
     try {
       const state = await this.queryUserManager();
       if (state && state.participants.length > 0) {
-        return state.participants;
+        // Deduplicate by name — the same person can have multiple deviceIds
+        // (e.g. one for audio+video and one for a second video stream).
+        // Keep the first occurrence so the isHost flag is preserved.
+        const seen = new Set<string>();
+        const deduped = state.participants.filter((p) => {
+          const key = p.name.toLowerCase().trim();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return deduped;
       }
     } catch (err) {
       logger.warn(`GoogleMeetParticipantTracker.getParticipants error: ${err}`);

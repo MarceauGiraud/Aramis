@@ -1273,8 +1273,16 @@ export class GoogleMeetBot extends BaseMeetingBot {
       });
 
       if (umParticipants && umParticipants.length > 0) {
-        logger.info(`Extracted ${umParticipants.length} participants from UserManager (direct)`);
-        return umParticipants;
+        // Deduplicate by name — same person can have multiple deviceIds
+        const seen = new Set<string>();
+        const deduped = umParticipants.filter((p) => {
+          const key = p.name.toLowerCase().trim();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        logger.info(`Extracted ${deduped.length} participants from UserManager (direct)`);
+        return deduped;
       }
     } catch {
       // UserManager not available, fall through to DOM scraping

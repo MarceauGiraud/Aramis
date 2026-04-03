@@ -881,7 +881,11 @@ export class RecordingOrchestrator extends EventEmitter {
           '-c:v',
           'libvpx-vp9',
           '-b:v',
-          '1.5M',
+          '1M',
+          '-maxrate',
+          '2M',
+          '-bufsize',
+          '2M',
           '-crf',
           '32',
           '-g',
@@ -889,7 +893,7 @@ export class RecordingOrchestrator extends EventEmitter {
           '-deadline',
           'realtime',
           '-cpu-used',
-          '5',
+          '8',
           '-row-mt',
           '1',
           '-tile-columns',
@@ -1206,11 +1210,9 @@ export class RecordingOrchestrator extends EventEmitter {
 
     const args: string[] = ['-y'];
 
-    // When trimming, use input-level -ss (before each -i) for fast keyframe seek,
-    // then re-encode the video to guarantee frame-accurate start.
-    // Without re-encoding, -c:v copy with output-level -ss produces black frames
-    // from the trim point until the next keyframe (VP9 keyframes can be 8-16s apart).
-    // Input-level -ss applies per-input, so we add it before both video and audio.
+    // When trimming, use input-level -ss (before each -i) for fast keyframe seeking.
+    // The capture uses -g 48 (keyframe every 2s at 24fps), so the max black frame
+    // duration is ~2s — acceptable for production without expensive re-encoding.
     if (trimming) {
       args.push('-ss', String(trimStartSeconds));
     }
@@ -1223,34 +1225,7 @@ export class RecordingOrchestrator extends EventEmitter {
 
     args.push('-map', '0:v:0', '-map', '1:a:0');
 
-    if (trimming) {
-      // Re-encode video for frame-accurate trim start (no black frames).
-      // Uses the same VP9 settings as the original capture but optimized for
-      // post-processing (not realtime) so quality is slightly better.
-      const isWebMOutput = this.mergedPath!.endsWith('.webm');
-      if (isWebMOutput) {
-        args.push(
-          '-c:v',
-          'libvpx-vp9',
-          '-b:v',
-          '1.5M',
-          '-crf',
-          '32',
-          '-deadline',
-          'good',
-          '-cpu-used',
-          '4',
-          '-row-mt',
-          '1',
-        );
-      } else {
-        args.push('-c:v', 'libx264', '-crf', '23', '-preset', 'fast');
-      }
-      logger.info('Using video re-encode for frame-accurate trim');
-    } else {
-      // No trim — copy video stream (fast, no quality loss)
-      args.push('-c:v', 'copy');
-    }
+    args.push('-c:v', 'copy');
 
     // WebM containers require Opus audio; MP4 containers use AAC
     const isWebM = this.mergedPath!.endsWith('.webm');

@@ -286,6 +286,19 @@ export abstract class BaseMeetingBot {
         '--audio-buffer-size=2048',
         '--disable-background-timer-throttling',
         '--disable-external-intent-requests',
+        // Performance: reduce Chrome overhead for headless bot usage
+        '--disable-gpu-compositing',
+        '--disable-smooth-scrolling',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-translate',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--disable-domain-reliability',
+        '--no-pings',
+        '--disable-logging',
+        '--disable-frame-rate-limit',
         // Do NOT use --disable-web-security — Google Meet detects it.
       ],
     });

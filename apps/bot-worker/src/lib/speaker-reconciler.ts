@@ -127,6 +127,52 @@ export class SpeakerReconciler {
   }
 
   /**
+   * Reconcile speaker labels using participant tracker data.
+   *
+   * - 1 non-bot participant → all labels map to that participant
+   * - Same number of speakers and participants → positional mapping
+   * - Otherwise returns empty mapping (caller should fall back to DOM reconciliation)
+   */
+  reconcileWithParticipants(
+    speakerLabels: string[],
+    participants: Array<{ name: string; email?: string; isHost?: boolean }>,
+    botNamePattern = /aramis/i,
+  ): SpeakerMapping {
+    const result: SpeakerMapping = {
+      labelToName: new Map(),
+      confidence: new Map(),
+    };
+
+    const nonBotParticipants = participants.filter((p) => !botNamePattern.test(p.name));
+    if (nonBotParticipants.length === 0 || speakerLabels.length === 0) {
+      return result;
+    }
+
+    // Single participant: map all labels to that person
+    if (nonBotParticipants.length === 1) {
+      const name = nonBotParticipants[0].name;
+      for (const label of speakerLabels) {
+        result.labelToName.set(label, name);
+        result.confidence.set(label, 1.0);
+      }
+      logger.info(`Participant reconciliation: single participant "${name}" mapped to ${speakerLabels.length} labels`);
+      return result;
+    }
+
+    // Same count: positional mapping (low confidence)
+    if (nonBotParticipants.length === speakerLabels.length) {
+      for (let i = 0; i < speakerLabels.length; i++) {
+        result.labelToName.set(speakerLabels[i], nonBotParticipants[i].name);
+        result.confidence.set(speakerLabels[i], 0.5);
+      }
+      logger.info(`Participant reconciliation: positional mapping for ${speakerLabels.length} speakers/participants`);
+      return result;
+    }
+
+    return result;
+  }
+
+  /**
    * Convert a list of speaker change events into non-overlapping intervals.
    * Each event runs from its startTime until the next event's startTime
    * (or the end of the last segment for the final event).
