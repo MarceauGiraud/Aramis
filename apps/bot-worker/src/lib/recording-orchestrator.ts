@@ -875,6 +875,8 @@ export class RecordingOrchestrator extends EventEmitter {
     switch (codec) {
       case 'libvpx-vp9':
         // VP9: NVENC doesn't support VP9, always software
+        // -g sets max keyframe interval (2s at current framerate) to avoid
+        // long gaps between keyframes that cause black frames when seeking/trimming.
         return [
           '-c:v',
           'libvpx-vp9',
@@ -882,6 +884,8 @@ export class RecordingOrchestrator extends EventEmitter {
           '1.5M',
           '-crf',
           '32',
+          '-g',
+          String(this.config.frameRate * 2),
           '-deadline',
           'realtime',
           '-cpu-used',
@@ -1202,11 +1206,51 @@ export class RecordingOrchestrator extends EventEmitter {
 
     const args: string[] = ['-y'];
 
-    // Input files (no -ss here; we use output-level -ss for frame-accurate seeking)
+    // When trimming, use input-level -ss (before each -i) for fast keyframe seek,
+    // then re-encode the video to guarantee frame-accurate start.
+    // Without re-encoding, -c:v copy with output-level -ss produces black frames
+    // from the trim point until the next keyframe (VP9 keyframes can be 8-16s apart).
+    // Input-level -ss applies per-input, so we add it before both video and audio.
+    if (trimming) {
+      args.push('-ss', String(trimStartSeconds));
+    }
     args.push('-i', this.videoPath);
+
+    if (trimming) {
+      args.push('-ss', String(trimStartSeconds));
+    }
     args.push('-i', this.audioPath);
 
-    args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
+    args.push('-map', '0:v:0', '-map', '1:a:0');
+
+    if (trimming) {
+      // Re-encode video for frame-accurate trim start (no black frames).
+      // Uses the same VP9 settings as the original capture but optimized for
+      // post-processing (not realtime) so quality is slightly better.
+      const isWebMOutput = this.mergedPath!.endsWith('.webm');
+      if (isWebMOutput) {
+        args.push(
+          '-c:v',
+          'libvpx-vp9',
+          '-b:v',
+          '1.5M',
+          '-crf',
+          '32',
+          '-deadline',
+          'good',
+          '-cpu-used',
+          '4',
+          '-row-mt',
+          '1',
+        );
+      } else {
+        args.push('-c:v', 'libx264', '-crf', '23', '-preset', 'fast');
+      }
+      logger.info('Using video re-encode for frame-accurate trim');
+    } else {
+      // No trim — copy video stream (fast, no quality loss)
+      args.push('-c:v', 'copy');
+    }
 
     // WebM containers require Opus audio; MP4 containers use AAC
     const isWebM = this.mergedPath!.endsWith('.webm');
@@ -1216,14 +1260,6 @@ export class RecordingOrchestrator extends EventEmitter {
       args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2');
     }
     args.push('-async', '1');
-
-    // Trim from start if requested (removes waiting room frames).
-    // Placed as an OUTPUT option (after -i) for frame-accurate seeking.
-    // As an input option, FFmpeg would seek to the nearest keyframe which
-    // can overshoot by several seconds with VP9/WebM sparse keyframes.
-    if (trimming) {
-      args.push('-ss', String(trimStartSeconds));
-    }
 
     // Trim the end: limit output duration to remove trailing "bot alone" frames
     if (trimmingEnd) {

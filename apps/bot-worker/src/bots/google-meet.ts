@@ -1,5 +1,6 @@
 import { BaseMeetingBot, BotConfig, BotOptions, JoinError, PageState } from './base';
 import { MeetUIController } from '../lib/meet-ui-controller';
+import { GoogleMeetParticipantTracker } from '../lib/google-meet-participant-tracker';
 import { logger } from '../lib/logger';
 import { BOT_CONFIG } from '@aramis/shared';
 
@@ -153,6 +154,7 @@ export class GoogleMeetBot extends BaseMeetingBot {
   private lastKnownParticipantCount = 0;
   // meetingContentStartTime is inherited from BaseMeetingBot (protected)
   private meetUIController: MeetUIController | null = null;
+  private participantTracker: GoogleMeetParticipantTracker | null = null;
 
   constructor(config: BotConfig, options: BotOptions = {}) {
     super({ ...config, platform: config.platform ?? 'GOOGLE_MEET' }, options);
@@ -397,6 +399,14 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Now prepare the UI. The trim will remove this setup period.
     await this.waitForWebRTCReady();
 
+    // Initialize the protobuf-based participant tracker.
+    // The browser-side UserManager is already injected by PER_PARTICIPANT_AUDIO_SCRIPT
+    // in base.ts; this class provides a typed Node-side API to read from it.
+    if (this.page) {
+      this.participantTracker = new GoogleMeetParticipantTracker(this.page);
+      await this.participantTracker.initialize();
+    }
+
     try {
       await this.page!.keyboard.press('F11');
     } catch {}
@@ -439,8 +449,11 @@ export class GoogleMeetBot extends BaseMeetingBot {
       '[aria-label*="Leave call" i]', // leave call button
     ].join(', ');
 
-    const deadline = Date.now() + 10_000; // 10s timeout
+    const startWait = Date.now();
+    const deadline = startWait + 10_000; // 10s timeout
+    let pollCount = 0;
     while (Date.now() < deadline) {
+      pollCount++;
       try {
         const el = await this.page.$(meetingUISelector);
         if (el) {
@@ -452,11 +465,17 @@ export class GoogleMeetBot extends BaseMeetingBot {
             'text=Waiting for someone',
           ]);
           if (stillWaiting) {
-            // Still transitioning from waiting room — keep polling
+            if (pollCount % 8 === 0) {
+              logger.debug(
+                `waitForMeetingUIReady: UI element found but waiting room text still visible (${((Date.now() - startWait) / 1000).toFixed(1)}s elapsed)`,
+              );
+            }
             await this.sleep(250);
             continue;
           }
-          logger.info('Meeting UI is ready — participant tiles / controls visible');
+          logger.info(
+            `Meeting UI is ready — participant tiles / controls visible (detected in ${((Date.now() - startWait) / 1000).toFixed(1)}s, ${pollCount} polls)`,
+          );
           // Brief settle for rendering to complete (video tile paint)
           await this.sleep(500);
           return;
@@ -464,12 +483,19 @@ export class GoogleMeetBot extends BaseMeetingBot {
       } catch {
         // page may be navigating
       }
+      if (pollCount % 8 === 0) {
+        logger.debug(
+          `waitForMeetingUIReady: no matching UI elements yet (${((Date.now() - startWait) / 1000).toFixed(1)}s elapsed)`,
+        );
+      }
       await this.sleep(250);
     }
 
-    // If we timed out, add a fixed delay as a safety margin so the
-    // waiting-room-to-meeting transition has time to complete visually.
-    logger.warn('Meeting UI ready timeout — adding 1.5s safety delay before recording');
+    // If we timed out, meetingContentStartTime will still be set after this
+    // returns, but the trim may be less accurate. Log clearly so we can debug.
+    logger.warn(
+      `waitForMeetingUIReady: TIMED OUT after 10s (${pollCount} polls) — UI selectors never matched. Adding 1.5s safety delay.`,
+    );
     await this.sleep(1500);
   }
 
@@ -963,19 +989,34 @@ export class GoogleMeetBot extends BaseMeetingBot {
     // Fallback: check UserManager for participants with status != 1 (not in meeting)
     // This handles the case where DOM-based participant count never saw other participants
     // but the protobuf data channel knows they were there and left.
+    // Prefer the typed ParticipantTracker when available, with direct evaluate as fallback.
     try {
-      const userManagerState = await this.page.evaluate(() => {
-        const um = (window as any).__aramisUserManager;
-        if (!um || !um.allUsersMap || um.allUsersMap.size === 0) return null;
-        let totalUsers = 0;
-        let activeUsers = 0;
-        for (const [deviceId, user] of um.allUsersMap) {
-          if (um.isCurrentUser(deviceId)) continue; // skip bot
-          totalUsers++;
-          if ((user as any).status === 1) activeUsers++; // status 1 = in meeting
+      let userManagerState: { totalUsers: number; activeUsers: number } | null = null;
+
+      if (this.participantTracker) {
+        const state = await this.participantTracker.getState();
+        if (state) {
+          userManagerState = { totalUsers: state.totalUsers, activeUsers: state.activeUsers };
         }
-        return { totalUsers, activeUsers };
-      });
+      }
+
+      if (!userManagerState) {
+        userManagerState = await this.page.evaluate(() => {
+          const um = (window as unknown as Record<string, unknown>).__aramisUserManager as {
+            allUsersMap?: Map<string, Record<string, unknown>>;
+            isCurrentUser?: (deviceId: string) => boolean;
+          } | null;
+          if (!um?.allUsersMap || um.allUsersMap.size === 0) return null;
+          let totalUsers = 0;
+          let activeUsers = 0;
+          for (const [deviceId, user] of um.allUsersMap) {
+            if (um.isCurrentUser?.(deviceId)) continue;
+            totalUsers++;
+            if ((user.status as number) === 1) activeUsers++;
+          }
+          return { totalUsers, activeUsers };
+        });
+      }
 
       if (userManagerState && userManagerState.totalUsers > 0 && userManagerState.activeUsers === 0) {
         logger.info(
@@ -1196,26 +1237,43 @@ export class GoogleMeetBot extends BaseMeetingBot {
   async extractParticipants(): Promise<{ name: string; email?: string; isHost?: boolean }[]> {
     if (!this.page) return [];
 
-    // Primary: use UserManager (protobuf data channel) — most reliable source
+    // Primary: use the GoogleMeetParticipantTracker (typed wrapper around
+    // the browser-side UserManager populated from protobuf data channel)
+    if (this.participantTracker) {
+      try {
+        const trackerParticipants = await this.participantTracker.getParticipants();
+        if (trackerParticipants.length > 0) {
+          logger.info(`Extracted ${trackerParticipants.length} participants from ParticipantTracker`);
+          return trackerParticipants;
+        }
+      } catch {
+        // Tracker not available, fall through
+      }
+    }
+
+    // Secondary: direct UserManager query (fallback if tracker not initialized)
     try {
       const umParticipants = await this.page.evaluate(() => {
-        const um = (window as any).__aramisUserManager;
-        if (!um || !um.allUsersMap || um.allUsersMap.size === 0) return null;
+        const um = (window as unknown as Record<string, unknown>).__aramisUserManager as {
+          allUsersMap?: Map<string, Record<string, unknown>>;
+          isCurrentUser?: (deviceId: string) => boolean;
+        } | null;
+        if (!um?.allUsersMap || um.allUsersMap.size === 0) return null;
         const results: Array<{ name: string; email?: string; isHost?: boolean }> = [];
         for (const [deviceId, user] of um.allUsersMap) {
-          if (um.isCurrentUser(deviceId)) continue;
-          const name = (user as any).fullName || (user as any).displayName;
+          if (um.isCurrentUser?.(deviceId)) continue;
+          const name = (user.fullName as string) || (user.displayName as string);
           if (!name) continue;
           results.push({
             name,
-            isHost: !!(user as any).isHost,
+            isHost: !!(user.isHost as boolean),
           });
         }
         return results;
       });
 
       if (umParticipants && umParticipants.length > 0) {
-        logger.info(`Extracted ${umParticipants.length} participants from UserManager`);
+        logger.info(`Extracted ${umParticipants.length} participants from UserManager (direct)`);
         return umParticipants;
       }
     } catch {
@@ -1401,10 +1459,24 @@ export class GoogleMeetBot extends BaseMeetingBot {
     }
   }
 
+  /**
+   * Resolve a WebRTC stream ID or CSRC source ID to a participant name.
+   * Uses the protobuf-based participant tracker for reliable name resolution.
+   */
+  async getSpeakerNameFromStreamId(streamId: string): Promise<string | null> {
+    return this.participantTracker?.getSpeakerName(streamId) ?? null;
+  }
+
   async leave(): Promise<void> {
     if (!this.page) return;
 
     logger.info('Leaving Google Meet');
+
+    // Dispose the participant tracker polling loop
+    if (this.participantTracker) {
+      this.participantTracker.dispose();
+      this.participantTracker = null;
+    }
 
     // Restore toolbar visibility so leave button is clickable
     if (this.meetUIController) {
