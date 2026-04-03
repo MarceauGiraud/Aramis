@@ -274,8 +274,21 @@ export class GoogleMeetBot extends BaseMeetingBot {
         this.joinedAt = new Date();
         await this.turnOffCamera();
         await this.turnOffMicrophone();
+        if (this.page) {
+          this.meetUIController = new MeetUIController(this.page);
+          const view = this.config.recordingConfig?.view ?? 'speaker';
+          await this.meetUIController.setView(view);
+        }
         await this.startRecording();
+        await this.waitForMeetingUIReady();
         this.meetingContentStartTime = Date.now();
+        logger.info('Meeting content starts — UI ready, recording already running');
+        if (this.page) {
+          this.participantTracker = new GoogleMeetParticipantTracker(this.page);
+          this.participantTracker.initialize().catch((err) => {
+            logger.warn(`ParticipantTracker init failed (non-fatal): ${err}`);
+          });
+        }
         return;
       case 'UNKNOWN':
         // Give it a moment, then re-check
