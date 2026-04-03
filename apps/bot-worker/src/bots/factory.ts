@@ -6,7 +6,8 @@ import { MeetingPlatform } from '@aramis/shared';
 
 export class MeetingBotFactory {
   static create(platform: MeetingPlatform | string, config: BotConfig, options?: BotOptions): BaseMeetingBot {
-    switch (platform) {
+    const normalized = platform.toUpperCase().replace('-', '_');
+    switch (normalized) {
       case 'ZOOM':
         return new ZoomBot(config, options);
       case 'TEAMS':
