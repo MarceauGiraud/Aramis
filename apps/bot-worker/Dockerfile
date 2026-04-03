@@ -53,6 +53,7 @@ RUN mkdir -p /tmp/recordings /tmp/bot-screenshots
 
 # Set environment variables
 ENV NODE_ENV=production
+ENV PULSE_SERVER=unix:/tmp/pulse-socket
 
 # Configure PulseAudio (daemon only -- sinks are created per-bot by DisplayAllocator)
 RUN mkdir -p /root/.config/pulse
@@ -63,8 +64,11 @@ EOF
 # Create entrypoint script: start PulseAudio, then Node
 # Xvfb displays and PulseAudio sinks are managed per-bot by DisplayAllocator
 RUN echo '#!/bin/bash\n\
-# Start PulseAudio in system mode (required when running as root in Docker)\n\
-pulseaudio --system --daemonize --exit-idle-time=-1 --disallow-exit --disallow-module-loading=false\n\
+# Start PulseAudio daemon (allow running as root in Docker via env override)\n\
+export PULSE_SERVER=unix:/tmp/pulse-socket\n\
+pulseaudio --daemonize --exit-idle-time=-1 \\\n\
+  --load="module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-socket" \\\n\
+  --log-level=error 2>/dev/null || true\n\
 sleep 1\n\
 \n\
 # Run the bot worker\n\
